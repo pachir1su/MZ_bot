@@ -30,7 +30,6 @@ class MZTranslator(app_commands.Translator):
                         context: app_commands.TranslationContext) -> str | None:
         if locale is not discord.Locale.korean:
             return None
-
         loc = context.location
         data = context.data
 
@@ -50,18 +49,16 @@ class MZTranslator(app_commands.Translator):
                     "mz_money":  "10분마다 1,000 코인 지급",
                     "mz_attend": "하루에 한 번 10,000 코인 지급",
                     "mz_rank":   "서버 잔액 순위 TOP 10",
-                    "mz_bet":    "승률 50%, 배당 1.96x (하우스 엣지 2%)",
+                    "mz_bet":    "승률 30~60% 랜덤, 결과는 ±베팅액",
                 }
                 return desc_map.get(data.name)
 
         if loc is app_commands.TranslationContextLocation.parameter_name:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount": return "금액"
-
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount": return "베팅 금액(정수)"
-
         return None
 
 
