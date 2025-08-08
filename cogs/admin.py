@@ -1,9 +1,20 @@
 import os, aiosqlite, json, time
 import discord
 from discord import app_commands
-from discord.ext import commands  # ← 추가: 코그 로드/리로드에 사용
+from discord.ext import commands
+from datetime import datetime, timezone
 
 DB_PATH = "economy.db"
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or "0")
+
+async def try_send_log(client: discord.Client, embed: discord.Embed):
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        ch = client.get_channel(LOG_CHANNEL_ID) or await client.fetch_channel(LOG_CHANNEL_ID)
+        await ch.send(embed=embed)
+    except Exception:
+        pass
 
 # ───────── 공통 유틸 ─────────
 def owner_only():
@@ -31,7 +42,7 @@ async def set_setting_field(db, gid: int, key: str, value: str):
     elif key in ("min_bet", "win_min_bps", "win_max_bps"):
         raw = value.strip().replace("%", "")
         if key.startswith("win_"):
-            num = int(round(float(raw) * 100))  # 66.5% -> 6650 bps
+            num = int(round(float(raw) * 100))
         else:
             num = int(raw)
         await db.execute(f"UPDATE guild_settings SET {key}=? WHERE guild_id=?", (num, gid))
@@ -121,6 +132,16 @@ class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
         em.title = f"{self.key_label} 변경 완료"
         await interaction.response.send_message(embed=em, ephemeral=True)
 
+        # 로그
+        log = discord.Embed(
+            title="설정 변경",
+            color=0x8E44AD,
+            timestamp=datetime.now(timezone.utc),
+            description=f"**{self.key_label}** → `{self.value}`",
+        )
+        log.set_footer(text=f"by {interaction.user} · Guild {interaction.guild.id}")
+        await try_send_log(interaction.client, log)
+
 class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     amount = discord.ui.TextInput(label="금액(정수)", placeholder="예) 10000", required=True)
     reason = discord.ui.TextInput(label="사유(선택)", style=discord.TextStyle.paragraph, required=False)
@@ -150,6 +171,20 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
             em.add_field(name="사유", value=str(self.reason), inline=False)
         em.set_footer(text=f"실행: {interaction.user.display_name}")
         await interaction.response.send_message(embed=em, ephemeral=True)
+
+        # 로그
+        log = discord.Embed(
+            title="관리자 잔액 조정",
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+            description=f"**{self.op} {amt:,}₩** → 대상 `{self.uid}`",
+        )
+        log.add_field(name="변화량", value=f"{sign}{delta:,}₩")
+        log.add_field(name="현재 잔액", value=f"{new_bal:,}₩")
+        if self.reason:
+            log.add_field(name="사유", value=str(self.reason), inline=False)
+        log.set_footer(text=f"by {interaction.user} · Guild {interaction.guild.id}")
+        await try_send_log(interaction.client, log)
 
 # ───────── Select: 대상 사용자 선택 (행 0 고정) ─────────
 class TargetUserSelect(discord.ui.UserSelect):
@@ -226,6 +261,13 @@ class AdminMenu(discord.ui.View):
             interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
         )
         await interaction.response.send_message(f"✅ **돈줘** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+        log = discord.Embed(
+            title="쿨타임 초기화",
+            color=0x16A085,
+            timestamp=datetime.now(timezone.utc),
+            description=f"[money] 대상: {scope}",
+        )
+        await try_send_log(interaction.client, log)
 
     @discord.ui.button(label="쿨타임 초기화: 출첵", style=discord.ButtonStyle.secondary, row=3)
     async def cd_attend(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -234,6 +276,13 @@ class AdminMenu(discord.ui.View):
             interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
         )
         await interaction.response.send_message(f"✅ **출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+        log = discord.Embed(
+            title="쿨타임 초기화",
+            color=0x16A085,
+            timestamp=datetime.now(timezone.utc),
+            description=f"[attend] 대상: {scope}",
+        )
+        await try_send_log(interaction.client, log)
 
     @discord.ui.button(label="쿨타임 초기화: 모두", style=discord.ButtonStyle.secondary, row=3)
     async def cd_both(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -242,6 +291,13 @@ class AdminMenu(discord.ui.View):
             interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
         )
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+        log = discord.Embed(
+            title="쿨타임 초기화",
+            color=0x16A085,
+            timestamp=datetime.now(timezone.utc),
+            description=f"[both] 대상: {scope}",
+        )
+        await try_send_log(interaction.client, log)
 
     # 행 4: 싱크/코그 리로드/닫기
     @discord.ui.button(label="명령 싱크(이 서버)", style=discord.ButtonStyle.primary, row=4)
@@ -250,6 +306,13 @@ class AdminMenu(discord.ui.View):
         synced = await interaction.client.tree.sync(guild=interaction.guild)
         names = ", ".join(f"/{c.name}" for c in synced)
         await interaction.followup.send(f"✅ 싱크 완료: {len(synced)}개\n{names}", ephemeral=True)
+        log = discord.Embed(
+            title="명령 싱크",
+            color=0x2980B9,
+            timestamp=datetime.now(timezone.utc),
+            description=f"Guild {interaction.guild.id} : {len(synced)}개",
+        )
+        await try_send_log(interaction.client, log)
 
     @discord.ui.button(label="코그 로드·리로드", style=discord.ButtonStyle.secondary, row=4)
     async def reload_cogs(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -270,7 +333,16 @@ class AdminMenu(discord.ui.View):
             except Exception as e:
                 results.append(f"❌ {ext}: {type(e).__name__}: {e}")
 
-        await interaction.followup.send(" / ".join(results), ephemeral=True)
+        msg = " / ".join(results)
+        await interaction.followup.send(msg, ephemeral=True)
+
+        log = discord.Embed(
+            title="코그 로드·리로드",
+            color=0x34495E,
+            timestamp=datetime.now(timezone.utc),
+            description=msg,
+        )
+        await try_send_log(interaction.client, log)
 
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
