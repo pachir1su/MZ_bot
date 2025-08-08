@@ -1,3 +1,4 @@
+# cogs/fun.py
 import random
 import discord
 from discord import app_commands
@@ -12,12 +13,11 @@ ANSWERS = [
     "절대 아니야",
 ]
 
-@app_commands.command(name="mz_ask", description="Ask a question and get a random answer")
-@app_commands.describe(question="Your question")
+@app_commands.command(name="mz_ask", description="Ask and get a random answer")
+@app_commands.describe(question="질문 내용")
 async def mz_ask(interaction: discord.Interaction, question: str):
-    reply = random.choice(ANSWERS)
-    # 임베드 대신 간단한 텍스트 응답
-    await interaction.response.send_message(f"질문: {question}\n면진이: {reply}")
+    pick = random.choice(ANSWERS)
+    await interaction.response.send_message(f"질문: {question}\n면진이: {pick}")
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_ask)
