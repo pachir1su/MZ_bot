@@ -1,3 +1,4 @@
+-- 기본 테이블
 CREATE TABLE IF NOT EXISTS users(
   guild_id INTEGER,
   user_id  INTEGER,
@@ -18,7 +19,7 @@ CREATE TABLE IF NOT EXISTS ledger(
   ts   INTEGER             -- epoch seconds
 );
 
--- (옵션) 추후 쿨다운/락에 쓰고 싶을 때 사용
+-- 중복 처리/레이트리밋 등에 사용 가능
 CREATE TABLE IF NOT EXISTS locks(
   guild_id INTEGER,
   user_id  INTEGER,
@@ -26,3 +27,19 @@ CREATE TABLE IF NOT EXISTS locks(
   until INTEGER,
   PRIMARY KEY (guild_id, user_id, key)
 );
+
+-- 길드별 설정
+CREATE TABLE IF NOT EXISTS guild_settings(
+  guild_id INTEGER PRIMARY KEY,
+  min_bet      INTEGER DEFAULT 1000,  -- 최소 베팅(₩)
+  win_min_bps  INTEGER DEFAULT 3000,  -- 승률 하한 30.00% (basis points)
+  win_max_bps  INTEGER DEFAULT 6000,  -- 승률 상한 60.00%
+  mode_name    TEXT    DEFAULT '일반 모드'
+);
+
+-- 권장 PRAGMA/인덱스
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+
+CREATE INDEX IF NOT EXISTS idx_users_gb ON users(guild_id, balance DESC);
+CREATE INDEX IF NOT EXISTS idx_ledger_gut ON ledger(guild_id, user_id, ts DESC);
