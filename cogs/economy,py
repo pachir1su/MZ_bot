@@ -23,11 +23,11 @@ def footer_text(mode_name: str) -> str:
     now = datetime.now(KST).strftime("%H:%M")
     return f"현재 모드 : {mode_name} · 오늘 {now}"
 
-def seconds_until_kst_midnight() -> int:
-    now = datetime.now(KST)
-    tomorrow = (now + timedelta(days=1)).date()
-    midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=KST)
-    return int((midnight - now).total_seconds())
+# ✅ 다음 KST 자정까지 남은 초 (항상 '내일 00:00 KST')
+def seconds_until_kst_midnight(now: datetime | None = None) -> int:
+    now = (now.astimezone(KST) if now else datetime.now(KST))
+    next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return int((next_midnight - now).total_seconds())
 
 # DB 유틸
 async def get_user(db, gid, uid):
@@ -87,20 +87,22 @@ async def mz_attend(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
     mode_name = await get_mode_name(gid)
     now_ts = int(time.time())
-    now_kst = datetime.now(KST).date()
+    now_kst = datetime.now(KST)
 
     async with aiosqlite.connect(DB_PATH) as db:
         u = await get_user(db, gid, uid)
         last_ts = u["last_daily_at"]
         last_date = (datetime.fromtimestamp(last_ts, tz=KST).date() if last_ts else None)
 
-        if last_date == now_kst:
-            remain = seconds_until_kst_midnight()
+        if last_date == now_kst.date():
+            remain = seconds_until_kst_midnight(now_kst)
             hrs, rem = divmod(remain, 3600)
             mins, secs = divmod(rem, 60)
+            reset_dt = now_kst.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            reset_str = reset_dt.strftime("%m월 %d일 00:00 (KST)")
             embed = discord.Embed(
                 title="이미 오늘 출석했습니다",
-                description=f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능",
+                description=f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능\n리셋: {reset_str}",
                 color=0xf1c40f
             )
             embed.set_footer(text=footer_text(mode_name))
@@ -120,7 +122,7 @@ async def mz_attend(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-# /면진순위 — 닉네임만 표시(태그 제거) + 캐시 미스 시 REST 조회로 이름 보강
+# /면진순위 — 이름 보강(REST) 포함
 @app_commands.command(name="mz_rank", description="Show top balances in this server")
 async def mz_rank(interaction: discord.Interaction):
     gid = interaction.guild.id
@@ -142,7 +144,6 @@ async def mz_rank(interaction: discord.Interaction):
             if m:
                 name = m.display_name
             else:
-                # 캐시에 없으면 전역 사용자 정보로 보강 (닉네임은 없지만 username/global_name 사용)
                 try:
                     u = await interaction.client.fetch_user(uid)
                     name = u.global_name or u.name
