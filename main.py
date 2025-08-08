@@ -75,6 +75,7 @@ class MZTranslator(app_commands.Translator):
 # Bot
 # ─────────────────────────────────────────────────────────────────────
 INTENTS = discord.Intents.default()
+INTENTS.members = True  # ← 멤버 닉네임 캐시 활성화(권장)
 bot = commands.Bot(command_prefix=None, intents=INTENTS)
 
 @bot.event
