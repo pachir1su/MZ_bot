@@ -126,6 +126,10 @@ async def mz_money(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
+# 한글 표기(Localization)
+mz_money.name_localizations = {"ko": "면진돈줘"}
+mz_money.description_localizations = {"ko": "10분마다 1,000 코인 지급"}
+
 # ── /면진출첵 ─────────────────────────────────────────────
 @app_commands.command(name="mz_attend", description="Daily attendance (+10000, resets 00:00 KST)")
 async def mz_attend(interaction: discord.Interaction):
@@ -167,6 +171,9 @@ async def mz_attend(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
+mz_attend.name_localizations = {"ko": "면진출첵"}
+mz_attend.description_localizations = {"ko": "자정(00:00 KST)마다 초기화되는 출석 보상"}
+
 # ── /면진순위 ─────────────────────────────────────────────
 @app_commands.command(name="mz_rank", description="Show top balances in this server")
 async def mz_rank(interaction: discord.Interaction):
@@ -206,6 +213,9 @@ async def mz_rank(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
+mz_rank.name_localizations = {"ko": "면진순위"}
+mz_rank.description_localizations = {"ko": "서버 잔액 순위 TOP 10(닉네임만 표시)"}
+
 # ── /면진잔액 ─────────────────────────────────────────────
 @app_commands.command(name="mz_balance_show", description="Show user's current balance")
 @app_commands.describe(user="대상 사용자(선택)")
@@ -220,6 +230,9 @@ async def mz_balance_show(interaction: discord.Interaction, user: discord.Member
     embed.add_field(name=target.display_name, value=won(u["balance"]), inline=False)
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
+
+mz_balance_show.name_localizations = {"ko": "면진잔액"}
+mz_balance_show.description_localizations = {"ko": "현재 잔액 확인(대상 선택 가능)"}
 
 # ── /면진송금 ─────────────────────────────────────────────
 @app_commands.command(name="mz_transfer", description="Transfer coins to another member in this server")
@@ -307,6 +320,9 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
     log.add_field(name="받은 잔액", value=won(new_receiver_bal))
     log.set_footer(text=f"Guild {interaction.guild.id}")
     await try_send_log(interaction.client, log)
+
+mz_transfer.name_localizations = {"ko": "면진송금"}
+mz_transfer.description_localizations = {"ko": "서버 멤버에게 코인을 송금합니다"}
 
 # ── setup ─────────────────────────────────────────────────
 async def setup(bot: discord.Client):
