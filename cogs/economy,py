@@ -7,10 +7,9 @@ DB_PATH = "economy.db"
 
 MONEY_COOLDOWN = 600       # 10분
 MONEY_AMOUNT   = 1_000
-DAILY_COOLDOWN = 86400     # 24시간
 DAILY_AMOUNT   = 10_000
 
-# ── 표시 유틸 ───────────────────────────────────────────
+# ── 표시/시간 유틸 ───────────────────────────────────────
 KST = timezone(timedelta(hours=9))
 def won(n: int) -> str: return f"{n:,}₩"
 
@@ -23,6 +22,12 @@ async def get_mode_name(gid: int) -> str:
 def footer_text(mode_name: str) -> str:
     now = datetime.now(KST).strftime("%H:%M")
     return f"현재 모드 : {mode_name} · 오늘 {now}"
+
+def seconds_until_kst_midnight() -> int:
+    now = datetime.now(KST)
+    tomorrow = (now + timedelta(days=1)).date()
+    midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=KST)
+    return int((midnight - now).total_seconds())
 
 # DB 유틸
 async def get_user(db, gid, uid):
@@ -44,10 +49,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
     )
 
 # /면진돈줘 — 임베드 출력
-@app_commands.command(
-    name="mz_money",
-    description="Claim periodic money (10 min CD, +1000)"
-)
+@app_commands.command(name="mz_money", description="Claim periodic money (10 min CD, +1000)")
 async def mz_money(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
     mode_name = await get_mode_name(gid)
@@ -79,20 +81,24 @@ async def mz_money(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-# /면진출첵 — 임베드 출력
-@app_commands.command(
-    name="mz_attend",
-    description="Daily attendance (+10000, 24h CD)"
-)
+# /면진출첵 — **KST 자정 기준** 하루 1회
+@app_commands.command(name="mz_attend", description="Daily attendance (+10000, resets 00:00 KST)")
 async def mz_attend(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
     mode_name = await get_mode_name(gid)
-    now = int(time.time())
+    now_ts = int(time.time())
+    now_kst = datetime.now(KST).date()
+
     async with aiosqlite.connect(DB_PATH) as db:
         u = await get_user(db, gid, uid)
-        last = u["last_daily_at"] or 0
-        if now - last < DAILY_COOLDOWN:
-            remain = DAILY_COOLDOWN - (now - last)
+        last_ts = u["last_daily_at"]
+        if last_ts is not None:
+            last_date = datetime.fromtimestamp(last_ts, tz=KST).date()
+        else:
+            last_date = None
+
+        if last_date == now_kst:
+            remain = seconds_until_kst_midnight()
             hrs, rem = divmod(remain, 3600)
             mins, secs = divmod(rem, 60)
             embed = discord.Embed(
@@ -106,7 +112,7 @@ async def mz_attend(interaction: discord.Interaction):
         new_bal = u["balance"] + DAILY_AMOUNT
         await db.execute(
             "UPDATE users SET balance=?, last_daily_at=? WHERE guild_id=? AND user_id=?",
-            (new_bal, now, gid, uid)
+            (new_bal, now_ts, gid, uid)
         )
         await write_ledger(db, gid, uid, "deposit", DAILY_AMOUNT, new_bal, {"reason": "attend"})
         await db.commit()
@@ -117,11 +123,8 @@ async def mz_attend(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-# /면진순위 — 임베드 출력
-@app_commands.command(
-    name="mz_rank",
-    description="Show top balances in this server"
-)
+# /면진순위 — 닉네임만 표시(태그 제거)
+@app_commands.command(name="mz_rank", description="Show top balances in this server")
 async def mz_rank(interaction: discord.Interaction):
     gid = interaction.guild.id
     mode_name = await get_mode_name(gid)
@@ -132,21 +135,35 @@ async def mz_rank(interaction: discord.Interaction):
         )
         rows = await cur.fetchall()
 
+    embed = discord.Embed(title="서버 게임 잔액 순위", color=0x2ecc71 if rows else 0x95a5a6)
     if not rows:
-        embed = discord.Embed(title="서버 게임 잔액 순위", description="데이터가 없습니다.", color=0x95a5a6)
-        embed.set_footer(text=footer_text(mode_name))
-        return await interaction.response.send_message(embed=embed)
+        embed.description = "데이터가 없습니다."
+    else:
+        lines = []
+        for i, (uid, bal) in enumerate(rows, start=1):
+            m = interaction.guild.get_member(uid)
+            name = (m.display_name if m else f"유저 {uid}")  # ← 멘션 제거
+            lines.append(f"{i}. {name}\n{won(bal)}")
+        embed.description = "\n".join(lines)
+        if interaction.guild.icon:
+            try: embed.set_thumbnail(url=interaction.guild.icon.url)
+            except Exception: pass
 
-    lines = []
-    for i, (uid, bal) in enumerate(rows, start=1):
-        m = interaction.guild.get_member(uid)
-        name = m.display_name if m else f"<@{uid}>"
-        lines.append(f"{i}. {name}\n{won(bal)}")
+    embed.set_footer(text=footer_text(mode_name))
+    await interaction.response.send_message(embed=embed)
 
-    embed = discord.Embed(title="서버 게임 잔액 순위", description="\n".join(lines), color=0x2ecc71)
-    if interaction.guild.icon:
-        try: embed.set_thumbnail(url=interaction.guild.icon.url)
-        except Exception: pass
+# /면진잔액 — 본인 또는 대상 잔액 조회
+@app_commands.command(name="mz_balance_show", description="Show user's current balance")
+@app_commands.describe(user="대상 사용자(선택)")
+async def mz_balance_show(interaction: discord.Interaction, user: discord.Member | None = None):
+    target = user or interaction.user
+    gid = interaction.guild.id
+    mode_name = await get_mode_name(gid)
+    async with aiosqlite.connect(DB_PATH) as db:
+        u = await get_user(db, gid, target.id)
+
+    embed = discord.Embed(title="현재 잔액", color=0x3498db)
+    embed.add_field(name=target.display_name, value=won(u["balance"]), inline=False)
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
@@ -154,3 +171,4 @@ async def setup(bot: discord.Client):
     bot.tree.add_command(mz_money)
     bot.tree.add_command(mz_attend)
     bot.tree.add_command(mz_rank)
+    bot.tree.add_command(mz_balance_show)
