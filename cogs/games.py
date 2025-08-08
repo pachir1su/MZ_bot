@@ -3,7 +3,9 @@ import discord
 from discord import app_commands
 
 DB_PATH = "economy.db"
-HOUSE_EDGE = 0.02
+HOUSE_EDGE = 0.02                # 하우스 엣지(= 기대 손실률) 2%
+WIN_PROB_BPS = 5000              # 승률 50.00% (basis points)
+PAYOUT_MULTIPLE = 2 * (1 - HOUSE_EDGE)  # 승리 시 총지급 배수(예: 1.96x)
 MAX_BET    = 10_000
 
 async def get_user(db, gid, uid):
@@ -20,19 +22,13 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# /면진도박 (기본명 mz_bet) — 코인플립
+# /면진도박 (기본명 mz_bet) — 앞/뒤 선택 없이 50% 승률 고정
 @app_commands.command(
     name="mz_bet",
-    description="Bet on coin flip (front/back, amount)"
+    description="Bet with 50% win chance; payout adjusted by house edge"
 )
-@app_commands.describe(side="front or back", amount="bet amount (integer)")
-async def mz_bet(interaction: discord.Interaction, side: str, amount: int):
-    side = side.strip()
-    if side not in ("앞", "뒤", "front", "back"):
-        return await interaction.response.send_message("side는 '앞' 또는 '뒤'만 가능합니다.")
-    if side in ("front", "back"):
-        side = "앞" if side == "front" else "뒤"
-
+@app_commands.describe(amount="bet amount (integer)")
+async def mz_bet(interaction: discord.Interaction, amount: int):
     if amount <= 0 or amount > MAX_BET:
         return await interaction.response.send_message(f"베팅 금액은 1~{MAX_BET:,} 범위입니다.")
 
@@ -44,28 +40,38 @@ async def mz_bet(interaction: discord.Interaction, side: str, amount: int):
             await db.execute("ROLLBACK")
             return await interaction.response.send_message("잔액 부족입니다.")
 
-        roll = secrets.randbelow(2)  # 0 or 1
-        win = (roll == 0 and side == "앞") or (roll == 1 and side == "뒤")
+        # 0~9999 중 추첨 → 0~4999면 승리(50.00%)
+        roll = secrets.randbelow(10_000)
+        win = roll < WIN_PROB_BPS
+
+        detail = f"승률 {WIN_PROB_BPS/100:.2f}% · 배당 {PAYOUT_MULTIPLE:.2f}x · 하우스 엣지 {HOUSE_EDGE*100:.2f}%"
 
         if win:
-            payout = int(amount * (2 - HOUSE_EDGE))  # 1.98배(2% 하우스엣지)
+            payout = int(round(amount * PAYOUT_MULTIPLE))   # 총지급액(원금 포함)
+            profit = payout - amount                        # 순이익
             new_bal = u["balance"] - amount + payout
             await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
             await write_ledger(
-                db, gid, uid, "bet_win", payout - amount, new_bal,
-                {"game": "coinflip", "bet": amount, "roll": roll, "side": side}
+                db, gid, uid, "bet_win", profit, new_bal,
+                {"game": "coinflip", "bet": amount, "roll": roll, "win_prob_bps": WIN_PROB_BPS,
+                 "payout_multiple": PAYOUT_MULTIPLE, "house_edge": HOUSE_EDGE}
             )
             await db.commit()
-            return await interaction.response.send_message(f"승리! +{payout - amount:,} → 잔액 {new_bal:,}")
+            return await interaction.response.send_message(
+                f"승리! +{profit:,} → 잔액 {new_bal:,}\n`{detail}`"
+            )
         else:
             new_bal = u["balance"] - amount
             await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
             await write_ledger(
                 db, gid, uid, "bet_lose", -amount, new_bal,
-                {"game": "coinflip", "bet": amount, "roll": roll, "side": side}
+                {"game": "coinflip", "bet": amount, "roll": roll, "win_prob_bps": WIN_PROB_BPS,
+                 "payout_multiple": PAYOUT_MULTIPLE, "house_edge": HOUSE_EDGE}
             )
             await db.commit()
-            return await interaction.response.send_message(f"패배… -{amount:,} → 잔액 {new_bal:,}")
+            return await interaction.response.send_message(
+                f"패배… -{amount:,} → 잔액 {new_bal:,}\n`{detail}`"
+            )
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_bet)
