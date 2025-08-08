@@ -11,6 +11,7 @@ DB_PATH = str(BASE_DIR / "economy.db")
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # 선택 사항
 
 # ─────────────────────────────────────────────────────────────────────
 # DB 초기화
@@ -30,47 +31,60 @@ class MZTranslator(app_commands.Translator):
                         context: app_commands.TranslationContext) -> str | None:
         if locale is not discord.Locale.korean:
             return None
+
         loc = context.location
         data = context.data
 
+        # 명령어 이름
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
-                    "mz_money":  "면진돈줘",
-                    "mz_attend": "면진출첵",
-                    "mz_rank":   "면진순위",
-                    "mz_bet":    "면진도박",
+                    "mz_money":        "면진돈줘",
+                    "mz_attend":       "면진출첵",
+                    "mz_rank":         "면진순위",
+                    "mz_bet":          "면진도박",
+                    "mz_config_view":  "면진설정보기",
+                    "mz_config_set":   "면진설정수정",
                 }
                 return mapping.get(data.name)
 
+        # 명령어 설명
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
-                    "mz_money":  "10분마다 1,000 코인 지급",
-                    "mz_attend": "하루에 한 번 10,000 코인 지급",
-                    "mz_rank":   "서버 잔액 순위 TOP 10",
-                    "mz_bet":    "승률 30~60% 랜덤, 결과는 ±베팅액",
+                    "mz_money":       "10분마다 1,000 코인 지급",
+                    "mz_attend":      "하루에 한 번 10,000 코인 지급",
+                    "mz_rank":        "서버 잔액 순위 TOP 10",
+                    "mz_bet":         "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩)",
+                    "mz_config_view": "서버 설정 보기(관리자 전용)",
+                    "mz_config_set":  "서버 설정 수정(관리자 전용)",
                 }
                 return desc_map.get(data.name)
 
+        # 파라미터 이름/설명
         if loc is app_commands.TranslationContextLocation.parameter_name:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount": return "금액"
+                if data.name == "field":  return "항목"
+                if data.name == "value":  return "값"
+
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
-                if data.name == "amount": return "베팅 금액(정수)"
-        return None
+                if data.name == "amount": return "베팅 금액(정수, 최소 1,000₩)"
+                if data.name == "field":  return "수정할 항목을 선택"
+                if data.name == "value":  return "값(정수 또는 문자열). 승률은 % 단위"
 
+        return None
 
 # ─────────────────────────────────────────────────────────────────────
 # Bot
 # ─────────────────────────────────────────────────────────────────────
 INTENTS = discord.Intents.default()
-# 접두사 명령 안 쓸 거면 prefix=None → 메시지 콘텐츠 인텐트 경고 제거
 bot = commands.Bot(command_prefix=None, intents=INTENTS)
 
 @bot.event
 async def on_ready():
+    await bot.change_presence(activity=discord.Game(name="/면진도박 · /면진돈줘"))
     print(f"✅ {bot.user} 로그인")
 
 async def setup_hook():
@@ -78,10 +92,13 @@ async def setup_hook():
     await bot.tree.set_translator(MZTranslator())
     await bot.load_extension("cogs.economy")
     await bot.load_extension("cogs.games")
+    await bot.load_extension("cogs.admin")
 
-    # 개발 중 즉시 반영 원하면 아래 줄의 주석 해제 후 서버 ID 입력
-    # await bot.tree.sync(guild=discord.Object(id=123456789012345678))
-    await bot.tree.sync()
+    # 개발 중 즉시 반영(선택)
+    if DEV_GUILD_ID:
+        await bot.tree.sync(guild=discord.Object(id=int(DEV_GUILD_ID)))
+    else:
+        await bot.tree.sync()
 
 bot.setup_hook = setup_hook
 
