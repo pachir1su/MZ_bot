@@ -1,4 +1,4 @@
-import os, aiosqlite, json, time, re
+import os, aiosqlite, json, time
 import discord
 from discord import app_commands
 
@@ -78,107 +78,56 @@ def settings_embed(s: dict) -> discord.Embed:
     em.add_field(name="모드명", value=s["mode_name"], inline=False)
     return em
 
-# ───────── 쿨타임 초기화 로직 ─────────
-async def reset_cooldown(
-    gid: int,
-    actor_id: int,
-    which: str,            # "money" | "attend" | "both"
-    target_uid: int | None # None이면 길드 전체
-):
+# ───────── 쿨타임 초기화 ─────────
+async def reset_cooldown(gid: int, actor_id: int, which: str, target_uid: int | None, reason: str | None = None):
     which = which.lower().strip()
     if which not in ("money", "attend", "both"):
         raise ValueError("which must be money/attend/both")
-
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
-
-        # 영향받는 수 계산(로그 출력용)
-        async def count_rows(col: str) -> int:
-            if target_uid is None:
-                cur = await db.execute(f"SELECT COUNT(*) FROM users WHERE guild_id=? AND {col} IS NOT NULL", (gid,))
-            else:
-                cur = await db.execute(f"SELECT COUNT(*) FROM users WHERE guild_id=? AND user_id=? AND {col} IS NOT NULL", (gid, target_uid))
-            (c,) = await cur.fetchone()
-            return int(c or 0)
-
-        affected_money = affected_attend = 0
         if which in ("money", "both"):
-            affected_money = await count_rows("last_claim_at")
             if target_uid is None:
                 await db.execute("UPDATE users SET last_claim_at=NULL WHERE guild_id=?", (gid,))
             else:
                 await db.execute("UPDATE users SET last_claim_at=NULL WHERE guild_id=? AND user_id=?", (gid, target_uid))
-
         if which in ("attend", "both"):
-            affected_attend = await count_rows("last_daily_at")
             if target_uid is None:
                 await db.execute("UPDATE users SET last_daily_at=NULL WHERE guild_id=?", (gid,))
             else:
                 await db.execute("UPDATE users SET last_daily_at=NULL WHERE guild_id=? AND user_id=?", (gid, target_uid))
-
-        # 감사 로그: 범위가 크면 개별 유저 대신 요약 로그 한 건
-        meta = {"by": actor_id, "which": which, "scope": ("all" if target_uid is None else "user")}
-        # user_id는 대상이 특정되면 해당 ID, 아니면 0으로 요약
+        meta = {"by": actor_id, "which": which, "scope": ("all" if target_uid is None else "user"), "reason": reason or ""}
         log_uid = (target_uid if target_uid is not None else 0)
         await db.execute(
             "INSERT INTO ledger(guild_id,user_id,kind,amount,balance_after,meta,ts) VALUES(?,?,?,?,?,?,?)",
             (gid, log_uid, "admin_reset_cd", 0, 0, json.dumps(meta), int(time.time()))
         )
-
         await db.commit()
 
-    return affected_money, affected_attend
-
-# ───────── 모달들 ─────────
-class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
-    value = discord.ui.TextInput(label="값", placeholder="예) 2000 / 35(%) / 이벤트 모드", required=True)
-
-    def __init__(self, key: str, key_label: str, gid: int):
-        super().__init__(timeout=180)
-        self.key = key
-        self.key_label = key_label
-        self.gid = gid
-        self.title = f"{key_label} 변경"
-
-    async def on_submit(self, interaction: discord.Interaction):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await set_setting_field(db, self.gid, self.key, str(self.value))
-            s = await get_settings(db, self.gid)
-        em = settings_embed(s)
-        em.title = f"{self.key_label} 변경 완료"
-        await interaction.response.send_message(embed=em, ephemeral=True)
-
-class BalanceModal(discord.ui.Modal, title="잔액 수정"):
-    target = discord.ui.TextInput(label="대상(사용자 ID 또는 @멘션)", placeholder="@닉네임 또는 123456789012345678", required=True)
-    op     = discord.ui.TextInput(label="동작(set/add/sub)", default="set", required=True, max_length=3)
+# ───────── 모달: 잔액 금액 입력 ─────────
+class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     amount = discord.ui.TextInput(label="금액(정수)", placeholder="예) 10000", required=True)
     reason = discord.ui.TextInput(label="사유(선택)", style=discord.TextStyle.paragraph, required=False)
 
-    def __init__(self, gid: int):
+    def __init__(self, gid: int, uid: int, op: str, user_label: str):
         super().__init__(timeout=180)
-        self.gid = gid
+        self.gid, self.uid, self.op, self.user_label = gid, uid, op, user_label
+        self.title = f"{user_label} · {op.upper()}"
 
     async def on_submit(self, interaction: discord.Interaction):
-        gid = self.gid
-        m = re.search(r"\d{5,20}", str(self.target))
-        if not m:
-            return await interaction.response.send_message("대상을 인식하지 못했습니다. @멘션 또는 숫자 ID를 입력하세요.", ephemeral=True)
-        uid = int(m.group(0))
-        op = str(self.op).strip().lower()
-        if op not in ("set", "add", "sub"):
-            return await interaction.response.send_message("동작은 set/add/sub 중 하나여야 합니다.", ephemeral=True)
         try:
             amt = int(str(self.amount).replace(",", "").strip())
         except ValueError:
             return await interaction.response.send_message("금액은 정수여야 합니다.", ephemeral=True)
-
-        old_bal, new_bal, delta = await apply_balance_change(gid, uid, op, amt, interaction.user.id, str(self.reason) or None)
+        old_bal, new_bal, delta = await apply_balance_change(
+            self.gid, self.uid, self.op, amt, interaction.user.id, str(self.reason) or None
+        )
         color = 0x2ecc71 if delta >= 0 else 0xe74c3c
         sign = "+" if delta >= 0 else ""
-        user_name = interaction.guild.get_member(uid).display_name if interaction.guild.get_member(uid) else f"{uid}"
+        member = interaction.guild.get_member(self.uid)
+        name = member.display_name if member else str(self.uid)
         em = discord.Embed(title="잔액 변경 완료", color=color)
-        em.add_field(name="대상", value=f"{user_name} (`{uid}`)")
-        em.add_field(name="동작", value=op)
+        em.add_field(name="대상", value=f"{name} (`{self.uid}`)")
+        em.add_field(name="동작", value=self.op)
         em.add_field(name="이전 잔액", value=f"{old_bal:,}₩")
         em.add_field(name="변화량", value=f"{sign}{delta:,}₩")
         em.add_field(name="현재 잔액", value=f"{new_bal:,}₩", inline=False)
@@ -187,65 +136,24 @@ class BalanceModal(discord.ui.Modal, title="잔액 수정"):
         em.set_footer(text=f"실행: {interaction.user.display_name}")
         await interaction.response.send_message(embed=em, ephemeral=True)
 
-class CooldownResetModal(discord.ui.Modal, title="쿨타임 초기화"):
-    target = discord.ui.TextInput(
-        label="대상(사용자 ID/@멘션 또는 all)",
-        placeholder="@닉네임 또는 123456789012345678 또는 all",
-        required=True
-    )
-    which  = discord.ui.TextInput(
-        label="항목(money/attend/both)",
-        default="both",
-        required=True,
-        max_length=6
-    )
-    reason = discord.ui.TextInput(
-        label="사유(선택)",
-        style=discord.TextStyle.paragraph,
-        required=False
-    )
+# ───────── Select: 대상 사용자 선택 ─────────
+class TargetUserSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1)
 
-    def __init__(self, gid: int):
-        super().__init__(timeout=180)
-        self.gid = gid
-
-    async def on_submit(self, interaction: discord.Interaction):
-        gid = self.gid
-        raw_target = str(self.target).strip().lower()
-        if raw_target in ("all", "everyone", "@everyone"):
-            target_uid = None
-        else:
-            m = re.search(r"\d{5,20}", str(self.target))
-            if not m:
-                return await interaction.response.send_message("대상을 인식하지 못했습니다. @멘션 또는 숫자 ID, 혹은 all 을 입력하세요.", ephemeral=True)
-            target_uid = int(m.group(0))
-
-        which = str(self.which).strip().lower()
-        if which not in ("money", "attend", "both"):
-            return await interaction.response.send_message("항목은 money/attend/both 중 하나여야 합니다.", ephemeral=True)
-
-        affected_money, affected_attend = await reset_cooldown(
-            gid=gid,
-            actor_id=interaction.user.id,
-            which=which,
-            target_uid=target_uid
-        )
-
-        scope_txt = "서버 전체" if target_uid is None else (interaction.guild.get_member(target_uid).display_name if interaction.guild.get_member(target_uid) else f"{target_uid}")
-        em = discord.Embed(title="쿨타임 초기화 완료", color=0x2ecc71)
-        em.add_field(name="대상", value=scope_txt, inline=False)
-        em.add_field(name="항목", value=which, inline=True)
-        em.add_field(name="초기화 수", value=f"money: {affected_money} · attend: {affected_attend}", inline=True)
-        if self.reason:
-            em.add_field(name="사유", value=str(self.reason), inline=False)
-        em.set_footer(text=f"실행: {interaction.user.display_name}")
-        await interaction.response.send_message(embed=em, ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        view: AdminMenu = self.view  # type: ignore
+        view.target_user_id = self.values[0].id if self.values else None
+        picked = interaction.guild.get_member(view.target_user_id).display_name if view.target_user_id else "서버 전체"
+        await interaction.response.send_message(f"대상 선택: **{picked}**", ephemeral=True)
 
 # ───────── 관리자 메뉴 View ─────────
 class AdminMenu(discord.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=300)
         self.gid = gid
+        self.target_user_id: int | None = None
+        self.add_item(TargetUserSelect())
 
     @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=0)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -255,29 +163,73 @@ class AdminMenu(discord.ui.View):
 
     @discord.ui.button(label="최소베팅 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_min_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ConfigValueModal("min_bet", "최소베팅", self.gid))
+        await interaction.response.send_modal(discord.ui.Modal.from_components(
+            discord.ui.InputText(label="값", placeholder="예) 2000", custom_id="val")),
+        )
 
     @discord.ui.button(label="승률하한(%) 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_win_min(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ConfigValueModal("win_min_bps", "승률 하한(%)", self.gid))
+        await interaction.response.send_modal(discord.ui.Modal(title="승률 하한(%) 변경", components=[
+            discord.ui.InputText(label="값", placeholder="예) 35", custom_id="val")
+        ]))
 
     @discord.ui.button(label="승률상한(%) 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_win_max(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ConfigValueModal("win_max_bps", "승률 상한(%)", self.gid))
+        await interaction.response.send_modal(discord.ui.Modal(title="승률 상한(%) 변경", components=[
+            discord.ui.InputText(label="값", placeholder="예) 60", custom_id="val")
+        ]))
 
     @discord.ui.button(label="모드명 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_mode_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ConfigValueModal("mode_name", "모드명", self.gid))
+        await interaction.response.send_modal(discord.ui.Modal(title="모드명 변경", components=[
+            discord.ui.InputText(label="값", placeholder="예) 이벤트 모드", custom_id="val")
+        ]))
 
-    @discord.ui.button(label="잔액 수정", style=discord.ButtonStyle.success, row=2)
-    async def balance_edit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BalanceModal(self.gid))
+    # ─ 잔액 편의 버튼 (대상 필요)
+    @discord.ui.button(label="잔액 설정", style=discord.ButtonStyle.success, row=2)
+    async def bal_set(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.target_user_id is None:
+            return await interaction.response.send_message("먼저 **대상 사용자**를 선택하세요.", ephemeral=True)
+        m = interaction.guild.get_member(self.target_user_id)
+        label = m.display_name if m else str(self.target_user_id)
+        await interaction.response.send_modal(BalanceAmountModal(self.gid, self.target_user_id, "set", label))
 
-    @discord.ui.button(label="쿨타임 초기화", style=discord.ButtonStyle.success, row=2)
-    async def cooldown_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CooldownResetModal(self.gid))
+    @discord.ui.button(label="잔액 증가", style=discord.ButtonStyle.success, row=2)
+    async def bal_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.target_user_id is None:
+            return await interaction.response.send_message("먼저 **대상 사용자**를 선택하세요.", ephemeral=True)
+        m = interaction.guild.get_member(self.target_user_id)
+        label = m.display_name if m else str(self.target_user_id)
+        await interaction.response.send_modal(BalanceAmountModal(self.gid, self.target_user_id, "add", label))
 
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="잔액 감소", style=discord.ButtonStyle.danger, row=2)
+    async def bal_sub(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.target_user_id is None:
+            return await interaction.response.send_message("먼저 **대상 사용자**를 선택하세요.", ephemeral=True)
+        m = interaction.guild.get_member(self.target_user_id)
+        label = m.display_name if m else str(self.target_user_id)
+        await interaction.response.send_modal(BalanceAmountModal(self.gid, self.target_user_id, "sub", label))
+
+    # ─ 쿨타임 초기화 (대상 선택 없으면 전체)
+    @discord.ui.button(label="쿨타임 초기화: 돈줘", style=discord.ButtonStyle.secondary, row=3)
+    async def cd_money(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await reset_cooldown(self.gid, interaction.user.id, "money", self.target_user_id, None)
+        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        await interaction.response.send_message(f"✅ **돈줘** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+
+    @discord.ui.button(label="쿨타임 초기화: 출첵", style=discord.ButtonStyle.secondary, row=3)
+    async def cd_attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await reset_cooldown(self.gid, interaction.user.id, "attend", self.target_user_id, None)
+        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        await interaction.response.send_message(f"✅ **출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+
+    @discord.ui.button(label="쿨타임 초기화: 모두", style=discord.ButtonStyle.secondary, row=3)
+    async def cd_both(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await reset_cooldown(self.gid, interaction.user.id, "both", self.target_user_id, None)
+        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
+
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
@@ -293,7 +245,7 @@ async def mz_admin(interaction: discord.Interaction):
         s = await get_settings(db, gid)
     em = settings_embed(s)
     em.title = "관리자 메뉴"
-    em.set_footer(text="원하는 항목을 선택하세요")
+    em.set_footer(text="원하는 항목을 선택하세요 (대상 미선택 = 서버 전체)")
     await interaction.response.send_message(embed=em, view=view, ephemeral=True)
 
 async def setup(bot: discord.Client):
