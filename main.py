@@ -51,6 +51,7 @@ class MZTranslator(app_commands.Translator):
                     "mz_config_view":  "면진설정보기",
                     "mz_config_set":   "면진설정수정",
                     "mz_balance":      "면진잔액수정",
+                    "mz_balance_show": "면진잔액",
                 }
                 return mapping.get(data.name)
 
@@ -59,12 +60,13 @@ class MZTranslator(app_commands.Translator):
             if isinstance(data, app_commands.Command):
                 desc_map = {
                     "mz_money":       "10분마다 1,000 코인 지급",
-                    "mz_attend":      "하루에 한 번 10,000 코인 지급",
-                    "mz_rank":        "서버 잔액 순위 TOP 10",
+                    "mz_attend":      "자정(00:00 KST)마다 초기화되는 출석 보상",
+                    "mz_rank":        "서버 잔액 순위 TOP 10(닉네임만 표시)",
                     "mz_bet":         "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩)",
                     "mz_config_view": "서버 설정 보기(관리자 전용)",
                     "mz_config_set":  "서버 설정 수정(관리자 전용)",
                     "mz_balance":     "특정 사용자의 잔액을 설정/증가/감소 (관리자 전용)",
+                    "mz_balance_show":"현재 잔액 확인(대상 선택 가능)",
                 }
                 return desc_map.get(data.name)
 
@@ -84,7 +86,7 @@ class MZTranslator(app_commands.Translator):
                 if data.name == "amount": return "베팅 금액(정수, 최소 1,000₩)"
                 if data.name == "field":  return "수정할 항목을 선택"
                 if data.name == "value":  return "값(정수 또는 문자열). 승률은 % 단위"
-                if data.name == "user":   return "잔액을 변경할 대상 사용자"
+                if data.name == "user":   return "대상 사용자"
                 if data.name == "op":     return "설정(=) / 증가(+) / 감소(-) 중 선택"
                 if data.name == "reason": return "변경 사유(선택)"
 
