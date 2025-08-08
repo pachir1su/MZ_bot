@@ -27,7 +27,6 @@ class MZTranslator(app_commands.Translator):
         loc = context.location
         data = context.data
 
-        # 명령어 이름
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
@@ -37,11 +36,10 @@ class MZTranslator(app_commands.Translator):
                     "mz_bet":          "면진도박",
                     "mz_balance_show": "면진잔액",
                     "mz_admin":        "면진관리자",
-                    "mz_ask":          "면진질문",   # ← 신규
+                    "mz_ask":          "질문",         # ← 변경: 한글 표시명을 '질문'으로
                 }
                 return mapping.get(data.name)
 
-        # 명령어 설명
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
@@ -51,23 +49,21 @@ class MZTranslator(app_commands.Translator):
                     "mz_bet":          "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩)",
                     "mz_balance_show": "현재 잔액 확인(대상 선택 가능)",
                     "mz_admin":        "관리자 메뉴 열기(관리자 전용)",
-                    "mz_ask":          "질문을 보내면 랜덤으로 대답합니다",  # ← 신규
+                    "mz_ask":          "질문을 보내면 랜덤으로 대답합니다",
                 }
                 return desc_map.get(data.name)
 
-        # 파라미터 이름
         if loc is app_commands.TranslationContextLocation.parameter_name:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount":   return "금액"
                 if data.name == "user":     return "대상"
-                if data.name == "question": return "질문"  # ← 신규
+                if data.name == "question": return "질문"
 
-        # 파라미터 설명
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount":   return "베팅 금액(정수, 최소 1,000₩)"
                 if data.name == "user":     return "대상 사용자"
-                if data.name == "question": return "질문 내용"  # ← 신규
+                if data.name == "question": return "질문 내용"
         return None
 
 INTENTS = discord.Intents.default()
