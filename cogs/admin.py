@@ -1,6 +1,7 @@
 import os, aiosqlite, json, time
 import discord
 from discord import app_commands
+from discord.ext import commands  # ← 추가: 코그 로드/리로드에 사용
 
 DB_PATH = "economy.db"
 
@@ -242,7 +243,35 @@ class AdminMenu(discord.ui.View):
         )
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
-    # 행 4: 닫기
+    # 행 4: 싱크/코그 리로드/닫기
+    @discord.ui.button(label="명령 싱크(이 서버)", style=discord.ButtonStyle.primary, row=4)
+    async def sync_commands(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        synced = await interaction.client.tree.sync(guild=interaction.guild)
+        names = ", ".join(f"/{c.name}" for c in synced)
+        await interaction.followup.send(f"✅ 싱크 완료: {len(synced)}개\n{names}", ephemeral=True)
+
+    @discord.ui.button(label="코그 로드·리로드", style=discord.ButtonStyle.secondary, row=4)
+    async def reload_cogs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async def load_or_reload(ext: str) -> str:
+            try:
+                await interaction.client.reload_extension(ext)
+                return f"reloaded {ext}"
+            except commands.ExtensionNotLoaded:
+                await interaction.client.load_extension(ext)
+                return f"loaded {ext}"
+
+        results = []
+        for ext in ("cogs.economy", "cogs.fun"):
+            try:
+                results.append(await load_or_reload(ext))
+            except Exception as e:
+                results.append(f"❌ {ext}: {type(e).__name__}: {e}")
+
+        await interaction.followup.send(" / ".join(results), ephemeral=True)
+
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
@@ -264,4 +293,3 @@ async def mz_admin(interaction: discord.Interaction):
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_admin)
-    
