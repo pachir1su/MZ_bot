@@ -12,14 +12,17 @@ DAILY_AMOUNT   = 10_000
 
 # ── 표시 유틸 ───────────────────────────────────────────
 KST = timezone(timedelta(hours=9))
-MODE_NAME = "일반 모드"
+def won(n: int) -> str: return f"{n:,}₩"
 
-def won(n: int) -> str:
-    return f"{n:,}₩"
+async def get_mode_name(gid: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT mode_name FROM guild_settings WHERE guild_id=?", (gid,))
+        row = await cur.fetchone()
+    return (row[0] if row else "일반 모드")
 
-def footer_text(balance: int) -> str:
+def footer_text(mode_name: str) -> str:
     now = datetime.now(KST).strftime("%H:%M")
-    return f"현재 모드 : {MODE_NAME} · 오늘 {now}"
+    return f"현재 모드 : {mode_name} · 오늘 {now}"
 
 # DB 유틸
 async def get_user(db, gid, uid):
@@ -47,6 +50,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
 )
 async def mz_money(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
+    mode_name = await get_mode_name(gid)
     now = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         u = await get_user(db, gid, uid)
@@ -56,9 +60,9 @@ async def mz_money(interaction: discord.Interaction):
             embed = discord.Embed(
                 title="잠시 후 이용 가능",
                 description=f"{remain//60}분 {remain%60}초 후 이용 가능",
-                color=0xf1c40f  # yellow
+                color=0xf1c40f
             )
-            embed.set_footer(text=footer_text(u["balance"]))
+            embed.set_footer(text=footer_text(mode_name))
             return await interaction.response.send_message(embed=embed)
 
         new_bal = u["balance"] + MONEY_AMOUNT
@@ -72,7 +76,7 @@ async def mz_money(interaction: discord.Interaction):
     embed = discord.Embed(title="돈 지급 (10분에 한 번 가능)", color=0x2ecc71)
     embed.add_field(name="\u200b", value=f"**{won(MONEY_AMOUNT)}**을 드렸어요", inline=False)
     embed.add_field(name="잔액", value=won(new_bal), inline=False)
-    embed.set_footer(text=footer_text(new_bal))
+    embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
 # /면진출첵 — 임베드 출력
@@ -82,6 +86,7 @@ async def mz_money(interaction: discord.Interaction):
 )
 async def mz_attend(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
+    mode_name = await get_mode_name(gid)
     now = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         u = await get_user(db, gid, uid)
@@ -95,7 +100,7 @@ async def mz_attend(interaction: discord.Interaction):
                 description=f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능",
                 color=0xf1c40f
             )
-            embed.set_footer(text=footer_text(u["balance"]))
+            embed.set_footer(text=footer_text(mode_name))
             return await interaction.response.send_message(embed=embed)
 
         new_bal = u["balance"] + DAILY_AMOUNT
@@ -109,7 +114,7 @@ async def mz_attend(interaction: discord.Interaction):
     embed = discord.Embed(title="돈 지급 (하루에 한 번 가능)", color=0x2ecc71)
     embed.add_field(name="\u200b", value=f"**{won(DAILY_AMOUNT)}**을 드렸어요", inline=False)
     embed.add_field(name="잔액", value=won(new_bal), inline=False)
-    embed.set_footer(text=footer_text(new_bal))
+    embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
 # /면진순위 — 임베드 출력
@@ -119,6 +124,7 @@ async def mz_attend(interaction: discord.Interaction):
 )
 async def mz_rank(interaction: discord.Interaction):
     gid = interaction.guild.id
+    mode_name = await get_mode_name(gid)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT user_id, balance FROM users WHERE guild_id=? ORDER BY balance DESC, user_id ASC LIMIT 10",
@@ -128,7 +134,7 @@ async def mz_rank(interaction: discord.Interaction):
 
     if not rows:
         embed = discord.Embed(title="서버 게임 잔액 순위", description="데이터가 없습니다.", color=0x95a5a6)
-        embed.set_footer(text=f"{footer_text(0)}")
+        embed.set_footer(text=footer_text(mode_name))
         return await interaction.response.send_message(embed=embed)
 
     lines = []
@@ -139,11 +145,9 @@ async def mz_rank(interaction: discord.Interaction):
 
     embed = discord.Embed(title="서버 게임 잔액 순위", description="\n".join(lines), color=0x2ecc71)
     if interaction.guild.icon:
-        try:
-            embed.set_thumbnail(url=interaction.guild.icon.url)
-        except Exception:
-            pass
-    embed.set_footer(text=f"{footer_text(rows[0][1])}")
+        try: embed.set_thumbnail(url=interaction.guild.icon.url)
+        except Exception: pass
+    embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
 async def setup(bot: discord.Client):
