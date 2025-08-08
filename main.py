@@ -36,7 +36,7 @@ class MZTranslator(app_commands.Translator):
                     "mz_bet":          "면진도박",
                     "mz_balance_show": "면진잔액",
                     "mz_admin":        "면진관리자",
-                    "mz_ask":          "질문",         # ← 변경: 한글 표시명을 '질문'으로
+                    "mz_ask":          "면진질문",   # ← 변경: '질문' → '면진질문'
                 }
                 return mapping.get(data.name)
 
