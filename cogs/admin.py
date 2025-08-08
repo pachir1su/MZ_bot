@@ -367,6 +367,7 @@ class AdminMenu(discord.ui.View):
         await interaction.response.edit_message(content="메뉴를 닫았습니다.", view=self)
 
 # ───────── 통합 관리자 슬래시 ─────────
+
 @app_commands.command(name="mz_admin", description="Open admin menu (owner only)")
 @owner_only()
 async def mz_admin(interaction: discord.Interaction):
@@ -378,6 +379,10 @@ async def mz_admin(interaction: discord.Interaction):
     em.title = "관리자 메뉴"
     em.set_footer(text="원하는 항목을 선택하세요 (대상 미선택 = 서버 전체)")
     await interaction.response.send_message(embed=em, view=view, ephemeral=True)
+
+# 한글 표기(Localization)
+mz_admin.name_localizations = {"ko": "면진관리자"}
+mz_admin.description_localizations = {"ko": "관리자 메뉴 열기(관리자 전용)"}
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_admin)
