@@ -1,19 +1,25 @@
-# cogs/economy.py
 import time, json, aiosqlite
 import discord
 from discord import app_commands
-from discord.ext import commands
-from settings import START_BONUS, MONEY_COOLDOWN, MONEY_AMOUNT, WORK_COOLDOWN, WORK_MIN, WORK_MAX
 
 DB_PATH = "economy.db"
 
+MONEY_COOLDOWN = 600       # 10분
+MONEY_AMOUNT   = 1_000
+DAILY_COOLDOWN = 86400     # 24시간
+DAILY_AMOUNT   = 10_000
+
 async def get_user(db, gid, uid):
-    cur = await db.execute("SELECT balance,last_claim_at,last_daily_at FROM users WHERE guild_id=? AND user_id=?", (gid, uid))
+    cur = await db.execute(
+        "SELECT balance,last_claim_at,last_daily_at FROM users WHERE guild_id=? AND user_id=?",
+        (gid, uid)
+    )
     row = await cur.fetchone()
-    if row: return {"balance":row[0], "last_claim_at":row[1], "last_daily_at":row[2]}
+    if row:
+        return {"balance": row[0], "last_claim_at": row[1], "last_daily_at": row[2]}
     await db.execute("INSERT INTO users(guild_id,user_id,balance) VALUES(?,?,?)", (gid, uid, 0))
     await db.commit()
-    return {"balance":0, "last_claim_at":None, "last_daily_at":None}
+    return {"balance": 0, "last_claim_at": None, "last_daily_at": None}
 
 async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
     await db.execute(
@@ -21,44 +27,78 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-class Economy(commands.Cog):
-    def __init__(self, bot): self.bot = bot
+# /면진돈줘 (기본명 mz_money)
+@app_commands.command(
+    name="mz_money",
+    description="Claim periodic money (10 min CD, +1000)"
+)
+async def mz_money(interaction: discord.Interaction):
+    gid, uid = interaction.guild.id, interaction.user.id
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        u = await get_user(db, gid, uid)
+        last = u["last_claim_at"] or 0
+        if now - last < MONEY_COOLDOWN:
+            remain = MONEY_COOLDOWN - (now - last)
+            return await interaction.response.send_message(
+                f"{remain//60}분 {remain%60}초 후 이용 가능"
+            )
+        new_bal = u["balance"] + MONEY_AMOUNT
+        await db.execute(
+            "UPDATE users SET balance=?, last_claim_at=? WHERE guild_id=? AND user_id=?",
+            (new_bal, now, gid, uid)
+        )
+        await write_ledger(db, gid, uid, "deposit", MONEY_AMOUNT, new_bal, {"reason": "money"})
+        await db.commit()
+    await interaction.response.send_message(f"+{MONEY_AMOUNT:,} 코인 지급 → 잔액 {new_bal:,}")
 
-    @app_commands.command(name="mz_start", description="MZ 시작 보너스 받기(1회)")
-    async def mz_start(self, interaction: discord.Interaction):
-        gid, uid = interaction.guild.id, interaction.user.id
-        async with aiosqlite.connect(DB_PATH) as db:
-            u = await get_user(db, gid, uid)
-            if u["balance"] > 0:
-                return await interaction.response.send_message("이미 시작하셨습니다.")
-            new_bal = START_BONUS
-            await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
-            await write_ledger(db, gid, uid, "deposit", START_BONUS, new_bal, {"reason":"start"})
-            await db.commit()
-        await interaction.response.send_message(f"시작 보너스 {START_BONUS:,} 코인 지급!")
+# /면진출첵 (기본명 mz_attend)
+@app_commands.command(
+    name="mz_attend",
+    description="Daily attendance (+10000, 24h CD)"
+)
+async def mz_attend(interaction: discord.Interaction):
+    gid, uid = interaction.guild.id, interaction.user.id
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        u = await get_user(db, gid, uid)
+        last = u["last_daily_at"] or 0
+        if now - last < DAILY_COOLDOWN:
+            remain = DAILY_COOLDOWN - (now - last)
+            hrs, rem = divmod(remain, 3600)
+            mins, secs = divmod(rem, 60)
+            return await interaction.response.send_message(
+                f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능"
+            )
+        new_bal = u["balance"] + DAILY_AMOUNT
+        await db.execute(
+            "UPDATE users SET balance=?, last_daily_at=? WHERE guild_id=? AND user_id=?",
+            (new_bal, now, gid, uid)
+        )
+        await write_ledger(db, gid, uid, "deposit", DAILY_AMOUNT, new_bal, {"reason": "attend"})
+        await db.commit()
+    await interaction.response.send_message(f"출석 완료! +{DAILY_AMOUNT:,} → 잔액 {new_bal:,}")
 
-    @app_commands.command(name="mz_balance", description="잔액 확인")
-    async def mz_balance(self, interaction: discord.Interaction):
-        gid, uid = interaction.guild.id, interaction.user.id
-        async with aiosqlite.connect(DB_PATH) as db:
-            u = await get_user(db, gid, uid)
-        await interaction.response.send_message(f"현재 잔액: {u['balance']:,} 코인")
+# /면진순위 (기본명 mz_rank)
+@app_commands.command(
+    name="mz_rank",
+    description="Show top balances in this server"
+)
+async def mz_rank(interaction: discord.Interaction):
+    gid = interaction.guild.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT user_id, balance FROM users WHERE guild_id=? ORDER BY balance DESC, user_id ASC LIMIT 10",
+            (gid,)
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        return await interaction.response.send_message("데이터가 없습니다.")
+    lines = [f"**{i}.** <@{uid}> — **{bal:,}**" for i, (uid, bal) in enumerate(rows, start=1)]
+    embed = discord.Embed(title="잔액 순위 TOP 10", description="\n".join(lines), color=0x4caf50)
+    await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="mz_money", description="10분마다 소액 지원")
-    async def mz_money(self, interaction: discord.Interaction):
-        gid, uid = interaction.guild.id, interaction.user.id
-        now = int(time.time())
-        async with aiosqlite.connect(DB_PATH) as db:
-            u = await get_user(db, gid, uid)
-            last = u["last_claim_at"] or 0
-            if now - last < MONEY_COOLDOWN:
-                remain = MONEY_COOLDOWN - (now - last)
-                return await interaction.response.send_message(f"{remain//60}분 {remain%60}초 후 이용 가능")
-            new_bal = u["balance"] + MONEY_AMOUNT
-            await db.execute("UPDATE users SET balance=?, last_claim_at=? WHERE guild_id=? AND user_id=?",
-                             (new_bal, now, gid, uid))
-            await write_ledger(db, gid, uid, "deposit", MONEY_AMOUNT, new_bal, {"reason":"money"})
-            await db.commit()
-        await interaction.response.send_message(f"+{MONEY_AMOUNT} 코인 지급 → 잔액 {new_bal:,}")
-
-async def setup(bot): await bot.add_cog(Economy(bot))
+async def setup(bot: discord.Client):
+    bot.tree.add_command(mz_money)
+    bot.tree.add_command(mz_attend)
+    bot.tree.add_command(mz_rank)
