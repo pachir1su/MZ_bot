@@ -1,4 +1,4 @@
-import os, aiosqlite, json, time
+import os, aiosqlite, json, time, re
 import discord
 from discord import app_commands
 
@@ -103,7 +103,25 @@ async def reset_cooldown(gid: int, actor_id: int, which: str, target_uid: int | 
         )
         await db.commit()
 
-# ───────── 모달: 잔액 금액 입력 ─────────
+# ───────── 모달들 ─────────
+class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
+    value = discord.ui.TextInput(label="값", placeholder="예) 2000 / 35(%) / 이벤트 모드", required=True)
+
+    def __init__(self, key: str, key_label: str, gid: int):
+        super().__init__(timeout=180)
+        self.key = key
+        self.key_label = key_label
+        self.gid = gid
+        self.title = f"{key_label} 변경"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await set_setting_field(db, self.gid, self.key, str(self.value))
+            s = await get_settings(db, self.gid)
+        em = settings_embed(s)
+        em.title = f"{self.key_label} 변경 완료"
+        await interaction.response.send_message(embed=em, ephemeral=True)
+
 class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     amount = discord.ui.TextInput(label="금액(정수)", placeholder="예) 10000", required=True)
     reason = discord.ui.TextInput(label="사유(선택)", style=discord.TextStyle.paragraph, required=False)
@@ -136,10 +154,10 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
         em.set_footer(text=f"실행: {interaction.user.display_name}")
         await interaction.response.send_message(embed=em, ephemeral=True)
 
-# ───────── Select: 대상 사용자 선택 ─────────
+# ───────── Select: 대상 사용자 선택 (행 0 고정) ─────────
 class TargetUserSelect(discord.ui.UserSelect):
     def __init__(self):
-        super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1)
+        super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         view: AdminMenu = self.view  # type: ignore
@@ -153,9 +171,11 @@ class AdminMenu(discord.ui.View):
         super().__init__(timeout=300)
         self.gid = gid
         self.target_user_id: int | None = None
+        # 행 0: 셀렉트 (단독)
         self.add_item(TargetUserSelect())
 
-    @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=0)
+    # 행 1: 설정 관련 버튼들 (최대 5개까지 같은 행에 공존 가능)
+    @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=1)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             s = await get_settings(db, self.gid)
@@ -163,29 +183,21 @@ class AdminMenu(discord.ui.View):
 
     @discord.ui.button(label="최소베팅 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_min_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(discord.ui.Modal.from_components(
-            discord.ui.InputText(label="값", placeholder="예) 2000", custom_id="val")),
-        )
+        await interaction.response.send_modal(ConfigValueModal("min_bet", "최소베팅", self.gid))
 
     @discord.ui.button(label="승률하한(%) 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_win_min(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(discord.ui.Modal(title="승률 하한(%) 변경", components=[
-            discord.ui.InputText(label="값", placeholder="예) 35", custom_id="val")
-        ]))
+        await interaction.response.send_modal(ConfigValueModal("win_min_bps", "승률 하한(%)", self.gid))
 
     @discord.ui.button(label="승률상한(%) 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_win_max(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(discord.ui.Modal(title="승률 상한(%) 변경", components=[
-            discord.ui.InputText(label="값", placeholder="예) 60", custom_id="val")
-        ]))
+        await interaction.response.send_modal(ConfigValueModal("win_max_bps", "승률 상한(%)", self.gid))
 
     @discord.ui.button(label="모드명 수정", style=discord.ButtonStyle.secondary, row=1)
     async def edit_mode_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(discord.ui.Modal(title="모드명 변경", components=[
-            discord.ui.InputText(label="값", placeholder="예) 이벤트 모드", custom_id="val")
-        ]))
+        await interaction.response.send_modal(ConfigValueModal("mode_name", "모드명", self.gid))
 
-    # ─ 잔액 편의 버튼 (대상 필요)
+    # 행 2: 잔액 조정
     @discord.ui.button(label="잔액 설정", style=discord.ButtonStyle.success, row=2)
     async def bal_set(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.target_user_id is None:
@@ -210,7 +222,7 @@ class AdminMenu(discord.ui.View):
         label = m.display_name if m else str(self.target_user_id)
         await interaction.response.send_modal(BalanceAmountModal(self.gid, self.target_user_id, "sub", label))
 
-    # ─ 쿨타임 초기화 (대상 선택 없으면 전체)
+    # 행 3: 쿨타임 초기화
     @discord.ui.button(label="쿨타임 초기화: 돈줘", style=discord.ButtonStyle.secondary, row=3)
     async def cd_money(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "money", self.target_user_id, None)
@@ -229,6 +241,7 @@ class AdminMenu(discord.ui.View):
         scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
+    # 행 4: 닫기
     @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
