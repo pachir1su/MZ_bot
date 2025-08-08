@@ -1,6 +1,7 @@
 import time, json, aiosqlite
 import discord
 from discord import app_commands
+from datetime import datetime, timezone, timedelta
 
 DB_PATH = "economy.db"
 
@@ -9,6 +10,18 @@ MONEY_AMOUNT   = 1_000
 DAILY_COOLDOWN = 86400     # 24시간
 DAILY_AMOUNT   = 10_000
 
+# ── 표시 유틸 ───────────────────────────────────────────
+KST = timezone(timedelta(hours=9))
+MODE_NAME = "일반 모드"
+
+def won(n: int) -> str:
+    return f"{n:,}₩"
+
+def footer_text(balance: int) -> str:
+    now = datetime.now(KST).strftime("%H:%M")
+    return f"현재 모드 : {MODE_NAME} · 오늘 {now}"
+
+# DB 유틸
 async def get_user(db, gid, uid):
     cur = await db.execute(
         "SELECT balance,last_claim_at,last_daily_at FROM users WHERE guild_id=? AND user_id=?",
@@ -27,7 +40,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# /면진돈줘 (기본명 mz_money)
+# /면진돈줘 — 임베드 출력
 @app_commands.command(
     name="mz_money",
     description="Claim periodic money (10 min CD, +1000)"
@@ -40,9 +53,14 @@ async def mz_money(interaction: discord.Interaction):
         last = u["last_claim_at"] or 0
         if now - last < MONEY_COOLDOWN:
             remain = MONEY_COOLDOWN - (now - last)
-            return await interaction.response.send_message(
-                f"{remain//60}분 {remain%60}초 후 이용 가능"
+            embed = discord.Embed(
+                title="잠시 후 이용 가능",
+                description=f"{remain//60}분 {remain%60}초 후 이용 가능",
+                color=0xf1c40f  # yellow
             )
+            embed.set_footer(text=footer_text(u["balance"]))
+            return await interaction.response.send_message(embed=embed)
+
         new_bal = u["balance"] + MONEY_AMOUNT
         await db.execute(
             "UPDATE users SET balance=?, last_claim_at=? WHERE guild_id=? AND user_id=?",
@@ -50,9 +68,14 @@ async def mz_money(interaction: discord.Interaction):
         )
         await write_ledger(db, gid, uid, "deposit", MONEY_AMOUNT, new_bal, {"reason": "money"})
         await db.commit()
-    await interaction.response.send_message(f"+{MONEY_AMOUNT:,} 코인 지급 → 잔액 {new_bal:,}")
 
-# /면진출첵 (기본명 mz_attend)
+    embed = discord.Embed(title="돈 지급 (10분에 한 번 가능)", color=0x2ecc71)
+    embed.add_field(name="\u200b", value=f"**{won(MONEY_AMOUNT)}**을 드렸어요", inline=False)
+    embed.add_field(name="잔액", value=won(new_bal), inline=False)
+    embed.set_footer(text=footer_text(new_bal))
+    await interaction.response.send_message(embed=embed)
+
+# /면진출첵 — 임베드 출력
 @app_commands.command(
     name="mz_attend",
     description="Daily attendance (+10000, 24h CD)"
@@ -67,9 +90,14 @@ async def mz_attend(interaction: discord.Interaction):
             remain = DAILY_COOLDOWN - (now - last)
             hrs, rem = divmod(remain, 3600)
             mins, secs = divmod(rem, 60)
-            return await interaction.response.send_message(
-                f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능"
+            embed = discord.Embed(
+                title="이미 오늘 출석했습니다",
+                description=f"{int(hrs)}시간 {int(mins)}분 {int(secs)}초 후 다시 가능",
+                color=0xf1c40f
             )
+            embed.set_footer(text=footer_text(u["balance"]))
+            return await interaction.response.send_message(embed=embed)
+
         new_bal = u["balance"] + DAILY_AMOUNT
         await db.execute(
             "UPDATE users SET balance=?, last_daily_at=? WHERE guild_id=? AND user_id=?",
@@ -77,9 +105,14 @@ async def mz_attend(interaction: discord.Interaction):
         )
         await write_ledger(db, gid, uid, "deposit", DAILY_AMOUNT, new_bal, {"reason": "attend"})
         await db.commit()
-    await interaction.response.send_message(f"출석 완료! +{DAILY_AMOUNT:,} → 잔액 {new_bal:,}")
 
-# /면진순위 (기본명 mz_rank)
+    embed = discord.Embed(title="돈 지급 (하루에 한 번 가능)", color=0x2ecc71)
+    embed.add_field(name="\u200b", value=f"**{won(DAILY_AMOUNT)}**을 드렸어요", inline=False)
+    embed.add_field(name="잔액", value=won(new_bal), inline=False)
+    embed.set_footer(text=footer_text(new_bal))
+    await interaction.response.send_message(embed=embed)
+
+# /면진순위 — 임베드 출력
 @app_commands.command(
     name="mz_rank",
     description="Show top balances in this server"
@@ -92,10 +125,25 @@ async def mz_rank(interaction: discord.Interaction):
             (gid,)
         )
         rows = await cur.fetchall()
+
     if not rows:
-        return await interaction.response.send_message("데이터가 없습니다.")
-    lines = [f"**{i}.** <@{uid}> — **{bal:,}**" for i, (uid, bal) in enumerate(rows, start=1)]
-    embed = discord.Embed(title="잔액 순위 TOP 10", description="\n".join(lines), color=0x4caf50)
+        embed = discord.Embed(title="서버 게임 잔액 순위", description="데이터가 없습니다.", color=0x95a5a6)
+        embed.set_footer(text=f"{footer_text(0)}")
+        return await interaction.response.send_message(embed=embed)
+
+    lines = []
+    for i, (uid, bal) in enumerate(rows, start=1):
+        m = interaction.guild.get_member(uid)
+        name = m.display_name if m else f"<@{uid}>"
+        lines.append(f"{i}. {name}\n{won(bal)}")
+
+    embed = discord.Embed(title="서버 게임 잔액 순위", description="\n".join(lines), color=0x2ecc71)
+    if interaction.guild.icon:
+        try:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        except Exception:
+            pass
+    embed.set_footer(text=f"{footer_text(rows[0][1])}")
     await interaction.response.send_message(embed=embed)
 
 async def setup(bot: discord.Client):
