@@ -1,0 +1,64 @@
+# cogs/economy.py
+import time, json, aiosqlite
+import discord
+from discord import app_commands
+from discord.ext import commands
+from settings import START_BONUS, MONEY_COOLDOWN, MONEY_AMOUNT, WORK_COOLDOWN, WORK_MIN, WORK_MAX
+
+DB_PATH = "economy.db"
+
+async def get_user(db, gid, uid):
+    cur = await db.execute("SELECT balance,last_claim_at,last_daily_at FROM users WHERE guild_id=? AND user_id=?", (gid, uid))
+    row = await cur.fetchone()
+    if row: return {"balance":row[0], "last_claim_at":row[1], "last_daily_at":row[2]}
+    await db.execute("INSERT INTO users(guild_id,user_id,balance) VALUES(?,?,?)", (gid, uid, 0))
+    await db.commit()
+    return {"balance":0, "last_claim_at":None, "last_daily_at":None}
+
+async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
+    await db.execute(
+        "INSERT INTO ledger(guild_id,user_id,kind,amount,balance_after,meta,ts) VALUES(?,?,?,?,?,?,?)",
+        (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
+    )
+
+class Economy(commands.Cog):
+    def __init__(self, bot): self.bot = bot
+
+    @app_commands.command(name="mz_start", description="MZ 시작 보너스 받기(1회)")
+    async def mz_start(self, interaction: discord.Interaction):
+        gid, uid = interaction.guild.id, interaction.user.id
+        async with aiosqlite.connect(DB_PATH) as db:
+            u = await get_user(db, gid, uid)
+            if u["balance"] > 0:
+                return await interaction.response.send_message("이미 시작하셨습니다.")
+            new_bal = START_BONUS
+            await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
+            await write_ledger(db, gid, uid, "deposit", START_BONUS, new_bal, {"reason":"start"})
+            await db.commit()
+        await interaction.response.send_message(f"시작 보너스 {START_BONUS:,} 코인 지급!")
+
+    @app_commands.command(name="mz_balance", description="잔액 확인")
+    async def mz_balance(self, interaction: discord.Interaction):
+        gid, uid = interaction.guild.id, interaction.user.id
+        async with aiosqlite.connect(DB_PATH) as db:
+            u = await get_user(db, gid, uid)
+        await interaction.response.send_message(f"현재 잔액: {u['balance']:,} 코인")
+
+    @app_commands.command(name="mz_money", description="10분마다 소액 지원")
+    async def mz_money(self, interaction: discord.Interaction):
+        gid, uid = interaction.guild.id, interaction.user.id
+        now = int(time.time())
+        async with aiosqlite.connect(DB_PATH) as db:
+            u = await get_user(db, gid, uid)
+            last = u["last_claim_at"] or 0
+            if now - last < MONEY_COOLDOWN:
+                remain = MONEY_COOLDOWN - (now - last)
+                return await interaction.response.send_message(f"{remain//60}분 {remain%60}초 후 이용 가능")
+            new_bal = u["balance"] + MONEY_AMOUNT
+            await db.execute("UPDATE users SET balance=?, last_claim_at=? WHERE guild_id=? AND user_id=?",
+                             (new_bal, now, gid, uid))
+            await write_ledger(db, gid, uid, "deposit", MONEY_AMOUNT, new_bal, {"reason":"money"})
+            await db.commit()
+        await interaction.response.send_message(f"+{MONEY_AMOUNT} 코인 지급 → 잔액 {new_bal:,}")
+
+async def setup(bot): await bot.add_cog(Economy(bot))
