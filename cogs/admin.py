@@ -1,4 +1,4 @@
-import os, aiosqlite, json, time, re
+import os, aiosqlite, json, time
 import discord
 from discord import app_commands
 
@@ -106,14 +106,12 @@ async def reset_cooldown(gid: int, actor_id: int, which: str, target_uid: int | 
 # ───────── 모달들 ─────────
 class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
     value = discord.ui.TextInput(label="값", placeholder="예) 2000 / 35(%) / 이벤트 모드", required=True)
-
     def __init__(self, key: str, key_label: str, gid: int):
         super().__init__(timeout=180)
         self.key = key
         self.key_label = key_label
         self.gid = gid
-        self.title = f"{key_label} 변경"
-
+        self.title = f"{self.key_label} 변경"
     async def on_submit(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
             await set_setting_field(db, self.gid, self.key, str(self.value))
@@ -125,12 +123,10 @@ class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
 class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     amount = discord.ui.TextInput(label="금액(정수)", placeholder="예) 10000", required=True)
     reason = discord.ui.TextInput(label="사유(선택)", style=discord.TextStyle.paragraph, required=False)
-
     def __init__(self, gid: int, uid: int, op: str, user_label: str):
         super().__init__(timeout=180)
         self.gid, self.uid, self.op, self.user_label = gid, uid, op, user_label
         self.title = f"{user_label} · {op.upper()}"
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
             amt = int(str(self.amount).replace(",", "").strip())
@@ -158,7 +154,6 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
 class TargetUserSelect(discord.ui.UserSelect):
     def __init__(self):
         super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1, row=0)
-
     async def callback(self, interaction: discord.Interaction):
         view: AdminMenu = self.view  # type: ignore
         view.target_user_id = self.values[0].id if self.values else None
@@ -171,10 +166,10 @@ class AdminMenu(discord.ui.View):
         super().__init__(timeout=300)
         self.gid = gid
         self.target_user_id: int | None = None
-        # 행 0: 셀렉트 (단독)
+        # 행 0: 사용자 선택
         self.add_item(TargetUserSelect())
 
-    # 행 1: 설정 관련 버튼들 (최대 5개까지 같은 행에 공존 가능)
+    # 행 1: 설정 변경
     @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=1)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -226,19 +221,25 @@ class AdminMenu(discord.ui.View):
     @discord.ui.button(label="쿨타임 초기화: 돈줘", style=discord.ButtonStyle.secondary, row=3)
     async def cd_money(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "money", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **돈줘** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
     @discord.ui.button(label="쿨타임 초기화: 출첵", style=discord.ButtonStyle.secondary, row=3)
     async def cd_attend(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "attend", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
     @discord.ui.button(label="쿨타임 초기화: 모두", style=discord.ButtonStyle.secondary, row=3)
     async def cd_both(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "both", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
     # 행 4: 닫기
@@ -263,3 +264,4 @@ async def mz_admin(interaction: discord.Interaction):
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_admin)
+    
