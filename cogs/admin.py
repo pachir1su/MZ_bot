@@ -109,7 +109,6 @@ class BalanceModal(discord.ui.Modal, title="잔액 수정"):
 
     async def on_submit(self, interaction: discord.Interaction):
         gid = self.gid
-        # 사용자 ID 파싱
         m = re.search(r"\d{5,20}", str(self.target))
         if not m:
             return await interaction.response.send_message("대상을 인식하지 못했습니다. @멘션 또는 숫자 ID를 입력하세요.", ephemeral=True)
@@ -188,68 +187,5 @@ async def mz_admin(interaction: discord.Interaction):
     em.set_footer(text="원하는 항목을 선택하세요")
     await interaction.response.send_message(embed=em, view=view, ephemeral=True)
 
-# ───────── 기존 단독 명령(유지) ─────────
-@app_commands.command(name="mz_config_view", description="View guild settings (owner only)")
-@owner_only()
-async def mz_config_view(interaction: discord.Interaction):
-    gid = interaction.guild.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        s = await get_settings(db, gid)
-    await interaction.response.send_message(embed=settings_embed(s), ephemeral=True)
-
-CHOICE_FIELDS = [
-    app_commands.Choice(name="최소베팅", value="min_bet"),
-    app_commands.Choice(name="승률하한(%)", value="win_min_bps"),
-    app_commands.Choice(name="승률상한(%)", value="win_max_bps"),
-    app_commands.Choice(name="모드명", value="mode_name"),
-]
-
-@app_commands.command(name="mz_config_set", description="Modify guild settings (owner only)")
-@app_commands.choices(field=CHOICE_FIELDS)
-@app_commands.describe(value="값(정수 또는 문자열). 승률은 % 단위, 모드명은 글자")
-@owner_only()
-async def mz_config_set(interaction: discord.Interaction, field: app_commands.Choice[str], value: str):
-    gid = interaction.guild.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        await set_setting_field(db, gid, field.value, value)
-        s = await get_settings(db, gid)
-    em = settings_embed(s); em.title = "설정이 반영되었습니다"
-    await interaction.response.send_message(embed=em, ephemeral=True)
-
-BAL_OPS = [
-    app_commands.Choice(name="설정(=)", value="set"),
-    app_commands.Choice(name="증가(+)", value="add"),
-    app_commands.Choice(name="감소(-)", value="sub"),
-]
-
-@app_commands.command(name="mz_balance", description="Modify a user's balance (owner only)")
-@app_commands.choices(op=BAL_OPS)
-@app_commands.describe(user="대상 사용자", op="동작", amount="금액(정수)", reason="사유(선택)")
-@owner_only()
-async def mz_balance(
-    interaction: discord.Interaction,
-    user: discord.Member,
-    op: app_commands.Choice[str],
-    amount: int,
-    reason: str | None = None,
-):
-    old_bal, new_bal, delta = await apply_balance_change(
-        interaction.guild.id, user.id, op.value, amount, interaction.user.id, reason
-    )
-    color = 0x2ecc71 if delta >= 0 else 0xe74c3c
-    sign = "+" if delta >= 0 else ""
-    em = discord.Embed(title="잔액 변경 완료", color=color)
-    em.add_field(name="대상", value=f"{user.display_name} (`{user.id}`)")
-    em.add_field(name="동작", value=op.name)
-    em.add_field(name="이전 잔액", value=f"{old_bal:,}₩")
-    em.add_field(name="변화량", value=f"{sign}{delta:,}₩")
-    em.add_field(name="현재 잔액", value=f"{new_bal:,}₩", inline=False)
-    if reason: em.add_field(name="사유", value=reason, inline=False)
-    em.set_footer(text=f"실행: {interaction.user.display_name}")
-    await interaction.response.send_message(embed=em, ephemeral=True)
-
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_admin)
-    bot.tree.add_command(mz_config_view)
-    bot.tree.add_command(mz_config_set)
-    bot.tree.add_command(mz_balance)
