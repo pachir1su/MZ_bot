@@ -1,3 +1,4 @@
+import os
 import time
 import json
 import aiosqlite
@@ -12,13 +13,14 @@ MONEY_COOLDOWN = 600       # 10분
 MONEY_AMOUNT   = 1_000
 DAILY_AMOUNT   = 10_000
 
+# 운영 로그 채널
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or "0")
+
 # ── 표시/시간 유틸 ───────────────────────────────────────
 KST = timezone(timedelta(hours=9))
 
-
 def won(n: int) -> str:
     return f"{n:,}₩"
-
 
 async def get_mode_name(gid: int) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -26,18 +28,25 @@ async def get_mode_name(gid: int) -> str:
         row = await cur.fetchone()
     return (row[0] if row else "일반 모드")
 
-
 def footer_text(mode_name: str) -> str:
     now = datetime.now(KST).strftime("%H:%M")
     return f"현재 모드 : {mode_name} · 오늘 {now}"
 
-
-# ✅ 다음 KST 자정까지 남은 초 (항상 '내일 00:00 KST')
+# ✅ 다음 KST 자정까지 남은 초
 def seconds_until_kst_midnight(now: datetime | None = None) -> int:
     now = (now.astimezone(KST) if now else datetime.now(KST))
     next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     return int((next_midnight - now).total_seconds())
 
+# 운영 로그 헬퍼
+async def try_send_log(client: discord.Client, embed: discord.Embed):
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        ch = client.get_channel(LOG_CHANNEL_ID) or await client.fetch_channel(LOG_CHANNEL_ID)
+        await ch.send(embed=embed)
+    except Exception:
+        pass
 
 # ── DB 유틸 ───────────────────────────────────────────────
 async def get_user(db: aiosqlite.Connection, gid: int, uid: int):
@@ -52,7 +61,6 @@ async def get_user(db: aiosqlite.Connection, gid: int, uid: int):
     await db.commit()
     return {"balance": 0, "last_claim_at": None, "last_daily_at": None}
 
-
 async def write_ledger(
     db: aiosqlite.Connection, gid: int, uid: int, kind: str, amount: int, bal_after: int, meta: dict | None = None
 ):
@@ -61,14 +69,12 @@ async def write_ledger(
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time())),
     )
 
-
 # 서버 설정에서 최소 베팅(= 최소 송금액) 읽기
 async def get_min_transfer(gid: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT min_bet FROM guild_settings WHERE guild_id=?", (gid,))
         row = await cur.fetchone()
     return int(row[0]) if row and row[0] is not None else 1_000
-
 
 # ── /면진돈줘 ─────────────────────────────────────────────
 @app_commands.command(name="mz_money", description="Claim periodic money (10 min CD, +1000)")
@@ -92,7 +98,6 @@ async def mz_money(interaction: discord.Interaction):
         else:
             balance, last = row[0], (row[1] or 0)
 
-        # 미래 시각 보정
         if last > now:
             last = now
 
@@ -107,7 +112,6 @@ async def mz_money(interaction: discord.Interaction):
             embed.set_footer(text=footer_text(mode_name))
             return await interaction.response.send_message(embed=embed)
 
-        # 지급
         new_bal = balance + MONEY_AMOUNT
         await db.execute(
             "UPDATE users SET balance=?, last_claim_at=? WHERE guild_id=? AND user_id=?",
@@ -121,7 +125,6 @@ async def mz_money(interaction: discord.Interaction):
     embed.add_field(name="잔액", value=won(new_bal), inline=False)
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
-
 
 # ── /면진출첵 ─────────────────────────────────────────────
 @app_commands.command(name="mz_attend", description="Daily attendance (+10000, resets 00:00 KST)")
@@ -164,7 +167,6 @@ async def mz_attend(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-
 # ── /면진순위 ─────────────────────────────────────────────
 @app_commands.command(name="mz_rank", description="Show top balances in this server")
 async def mz_rank(interaction: discord.Interaction):
@@ -204,7 +206,6 @@ async def mz_rank(interaction: discord.Interaction):
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-
 # ── /면진잔액 ─────────────────────────────────────────────
 @app_commands.command(name="mz_balance_show", description="Show user's current balance")
 @app_commands.describe(user="대상 사용자(선택)")
@@ -220,7 +221,6 @@ async def mz_balance_show(interaction: discord.Interaction, user: discord.Member
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
-
 # ── /면진송금 ─────────────────────────────────────────────
 @app_commands.command(name="mz_transfer", description="Transfer coins to another member in this server")
 @app_commands.describe(member="받는 사람", amount="송금 금액(정수)")
@@ -230,7 +230,6 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
     gid = interaction.guild.id
     mode_name = await get_mode_name(gid)
 
-    # 기본 검증
     if receiver.id == sender.id:
         return await interaction.response.send_message("자기 자신에게는 송금할 수 없습니다.", ephemeral=True)
     if amount <= 0:
@@ -245,7 +244,6 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
 
-        # 송신자
         cur = await db.execute(
             "SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, sender.id)
         )
@@ -260,7 +258,6 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
             await db.execute("ROLLBACK")
             return await interaction.response.send_message("잔액이 부족합니다.", ephemeral=True)
 
-        # 수신자
         cur = await db.execute(
             "SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, receiver.id)
         )
@@ -271,7 +268,6 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
         else:
             receiver_bal = int(row[0])
 
-        # 잔액 갱신
         new_sender_bal = sender_bal - amount
         new_receiver_bal = receiver_bal + amount
 
@@ -282,37 +278,35 @@ async def mz_transfer(interaction: discord.Interaction, member: discord.Member, 
             "UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_receiver_bal, gid, receiver.id)
         )
 
-        # 레저 기록
         await write_ledger(
-            db,
-            gid,
-            sender.id,
-            "transfer_out",
-            -amount,
-            new_sender_bal,
-            {"to": receiver.id},
+            db, gid, sender.id, "transfer_out", -amount, new_sender_bal, {"to": receiver.id}
         )
         await write_ledger(
-            db,
-            gid,
-            receiver.id,
-            "transfer_in",
-            amount,
-            new_receiver_bal,
-            {"from": sender.id},
+            db, gid, receiver.id, "transfer_in", amount, new_receiver_bal, {"from": sender.id}
         )
 
         await db.commit()
 
     embed = discord.Embed(title="송금 완료", color=0x3498DB)
-    embed.add_field(name="보낸 사람", value=sender.display_name, inline=True)
-    embed.add_field(name="받는 사람", value=receiver.display_name, inline=True)
+    embed.add_field(name="보낸 사람", value=sender.mention, inline=True)
+    embed.add_field(name="받는 사람", value=receiver.mention, inline=True)
     embed.add_field(name="금액", value=won(amount), inline=False)
     embed.add_field(name="보낸 사람 잔액", value=won(new_sender_bal), inline=True)
     embed.add_field(name="받는 사람 잔액", value=won(new_receiver_bal), inline=True)
     embed.set_footer(text=footer_text(mode_name))
     await interaction.response.send_message(embed=embed)
 
+    # 운영 로그
+    log = discord.Embed(
+        title="송금",
+        color=0x2980B9,
+        timestamp=datetime.now(timezone.utc),
+        description=f"{sender.mention} → {receiver.mention} : **{won(amount)}**",
+    )
+    log.add_field(name="보낸 잔액", value=won(new_sender_bal))
+    log.add_field(name="받은 잔액", value=won(new_receiver_bal))
+    log.set_footer(text=f"Guild {interaction.guild.id}")
+    await try_send_log(interaction.client, log)
 
 # ── setup ─────────────────────────────────────────────────
 async def setup(bot: discord.Client):
