@@ -1,17 +1,18 @@
 # cogs/admin.py
-import os, aiosqlite, json, time, re
+import os, aiosqlite, json, time
 import discord
 from discord import app_commands
 
 DB_PATH = "economy.db"
 
-# ───────── 공통 유틸 ─────────
+# ───────── 권한 유틸 ─────────
 def owner_only():
     async def predicate(interaction: discord.Interaction) -> bool:
         owner_id = int(os.getenv("OWNER_ID", "0"))
         return interaction.user.id == owner_id
     return app_commands.check(predicate)
 
+# ───────── 설정/DB 유틸 ─────────
 async def get_settings(db, gid: int):
     cur = await db.execute(
         "SELECT min_bet, win_min_bps, win_max_bps, mode_name FROM guild_settings WHERE guild_id=?",
@@ -117,7 +118,7 @@ def admin_help_embed() -> discord.Embed:
     )
     return em
 
-# ───────── 모달들 ─────────
+# ───────── 모달 ─────────
 class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
     value = discord.ui.TextInput(label="값", placeholder="예) 2000 / 35(%) / 이벤트 모드", required=True)
 
@@ -142,7 +143,7 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     def __init__(self, gid: int, uid: int, op: str, user_label: str):
         super().__init__(timeout=180)
         self.gid, self.uid, self.op, self.user_label = gid, uid, op, user_label
-        self.title = f"{user_label} · {op.UPPER()}"
+        self.title = f"{user_label} · {op.upper()}"
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -167,7 +168,7 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
         em.set_footer(text=f"실행: {interaction.user.display_name}")
         await interaction.response.send_message(embed=em, ephemeral=True)
 
-# ───────── Select: 대상 사용자 선택 (행 0 고정) ─────────
+# ───────── Select: 대상 사용자 선택 (row=0 고정) ─────────
 class TargetUserSelect(discord.ui.UserSelect):
     def __init__(self):
         super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1, row=0)
@@ -175,7 +176,11 @@ class TargetUserSelect(discord.ui.UserSelect):
     async def callback(self, interaction: discord.Interaction):
         view: "AdminMenu" = self.view  # type: ignore
         view.target_user_id = self.values[0].id if self.values else None
-        picked = interaction.guild.get_member(view.target_user_id).display_name if view.target_user_id else "서버 전체"
+        if view.target_user_id is None:
+            picked = "서버 전체"
+        else:
+            m = interaction.guild.get_member(view.target_user_id)
+            picked = m.display_name if m else str(view.target_user_id)
         await interaction.response.send_message(f"대상 선택: **{picked}**", ephemeral=True)
 
 # ───────── 관리자 메뉴 View ─────────
@@ -187,7 +192,7 @@ class AdminMenu(discord.ui.View):
         # 행 0: 셀렉트 (단독)
         self.add_item(TargetUserSelect())
 
-    # 행 1: 설정 관련 버튼들
+    # 행 1: 설정 관련 버튼들 (최대 5개)
     @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=1)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -239,33 +244,51 @@ class AdminMenu(discord.ui.View):
     @discord.ui.button(label="쿨타임 초기화: 돈줘", style=discord.ButtonStyle.secondary, row=3)
     async def cd_money(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "money", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name
+            if interaction.guild.get_member(self.target_user_id) else str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **돈줘** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
     @discord.ui.button(label="쿨타임 초기화: 출첵", style=discord.ButtonStyle.secondary, row=3)
     async def cd_attend(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "attend", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name
+            if interaction.guild.get_member(self.target_user_id) else str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
     @discord.ui.button(label="쿨타임 초기화: 모두", style=discord.ButtonStyle.secondary, row=3)
     async def cd_both(self, interaction: discord.Interaction, button: discord.ui.Button):
         await reset_cooldown(self.gid, interaction.user.id, "both", self.target_user_id, None)
-        scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
+        scope = "서버 전체" if self.target_user_id is None else (
+            interaction.guild.get_member(self.target_user_id).display_name
+            if interaction.guild.get_member(self.target_user_id) else str(self.target_user_id)
+        )
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
-    # 행 4: 도움말 & 닫기 (0~4만 허용)
+    # 행 4: 운영 보조(도움말 / 재동기화 / 닫기) — 한 행에 최대 5개 가능
     @discord.ui.button(label="도움말", style=discord.ButtonStyle.secondary, row=4)
     async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=admin_help_embed(), ephemeral=True)
 
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)  # ← row=4로 수정
+    @discord.ui.button(label="명령 재동기화", style=discord.ButtonStyle.primary, row=4)
+    async def resync_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            synced = await interaction.client.tree.sync(guild=discord.Object(id=interaction.guild.id))
+            await interaction.followup.send(f"✅ 이 길드 재동기화 완료 · 현재 등록 {len(synced)}개", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"재동기화 중 문제 발생: {type(e).__name__}: {e}", ephemeral=True)
+
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(content="메뉴를 닫았습니다.", view=self)
 
-# ───────── 통합 관리자 슬래시 ─────────
+# ───────── 슬래시 명령 ─────────
 @app_commands.command(name="mz_admin", description="Open admin menu (owner only)")
 @owner_only()
 async def mz_admin(interaction: discord.Interaction):
