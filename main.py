@@ -14,19 +14,16 @@ def module_exists(mod: str) -> bool:
 
 # ───────── 번역기 ─────────
 class MZTranslator(app_commands.Translator):
-    async def translate(
-        self,
-        string: app_commands.locale_str,
-        locale: discord.Locale,
-        context: app_commands.TranslationContext,
-    ) -> str | None:
+    async def translate(self, string: app_commands.locale_str,
+                        locale: discord.Locale,
+                        context: app_commands.TranslationContext) -> str | None:
         if locale is not discord.Locale.korean:
             return None
 
         loc = context.location
         data = context.data
 
-        # 명령어 이름 한글화 (OK)
+        # 명령어 이름 한글화
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
@@ -42,11 +39,11 @@ class MZTranslator(app_commands.Translator):
                     "mz_genie":        "면진지니",
                     "mz_stock":        "면진주식",
                     "mz_coin":         "면진코인",
-                    "mz_bankruptcy":   "파산신청",
+                    "mz_bankruptcy":   "면진파산",   # 표시 이름
                 }
                 return mapping.get(data.name)
 
-        # 설명 한글화 (OK)
+        # 설명 한글화
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
@@ -66,19 +63,15 @@ class MZTranslator(app_commands.Translator):
                 }
                 return desc_map.get(data.name)
 
-        # ⚠ 파라미터 이름 로컬라이즈 금지 (Discord 검증에 막힘)
-        # if loc is app_commands.TranslationContextLocation.parameter_name:
-        #     ...
+        # 파라미터 이름 로컬라이즈(한글화)는 비활성화 — Discord 검증 충돌 방지
 
-        # 파라미터 설명 한글화 (OK)
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
-                if data.name == "amount": return "정수 금액(최소 베팅 이상)"
-                if data.name == "symbol": return "종목(주식)/코인(가상 자산)"
+                if data.name == "amount":   return "정수 금액(최소 베팅 이상)"
+                if data.name == "symbol":   return "종목(주식)/코인(가상 자산)"
                 if data.name == "question": return "질문 내용"
-                if data.name == "member": return "받는 사람 선택"
-                if data.name == "user": return "대상 사용자"
-
+                if data.name == "member":   return "받는 사람 선택"
+                if data.name == "user":     return "대상 사용자"
         return None
 
 
@@ -88,8 +81,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID", "").strip()
 
 INTENTS = discord.Intents.default()
-INTENTS.message_content = False  # 슬래시 중심
-
+INTENTS.message_content = False
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
 # ───────── DB 초기화 ─────────
@@ -109,7 +101,7 @@ async def on_ready():
 async def setup_hook():
     await init_db()
 
-    # 기존 코그
+    # 코그 로드
     await bot.load_extension("cogs.economy")
     try:
         await bot.load_extension("cogs.games")
@@ -117,26 +109,29 @@ async def setup_hook():
         pass
     await bot.load_extension("cogs.admin")
     await bot.load_extension("cogs.fun")
-
-    # 신규 코그
-    await bot.load_extension("cogs.tarot")      # 면진타로
-    if module_exists("cogs.genie"):             # 면진지니(있을 때만)
+    await bot.load_extension("cogs.tarot")
+    if module_exists("cogs.genie"):
         await bot.load_extension("cogs.genie")
     else:
         print("[load] cogs.genie not found — skipping")
-    await bot.load_extension("cogs.markets")    # 면진주식/면진코인/파산신청
+    await bot.load_extension("cogs.markets")  # 주식/코인/면진파산
 
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
 
-    # 개발 길드 우선 싱크
+    # 길드 우선 싱크 → 그 다음 전역 정리(중복 방지)
     gids = [g.strip() for g in DEV_GUILD_ID.split(",") if g.strip()]
     if gids:
         for gid in gids:
             gobj = discord.Object(id=int(gid))
-            bot.tree.copy_global_to(guild=gobj)
-            synced = await bot.tree.sync(guild=gobj)
+            bot.tree.copy_global_to(guild=gobj)           # ① 글로벌→길드 복사
+            synced = await bot.tree.sync(guild=gobj)       # ② 길드 싱크
             print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
+
+        # ③ 마지막에 전역 비우고 싱크(길드에는 이미 반영돼 유지)
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        print("[sync] cleared global commands")
     else:
         synced = await bot.tree.sync()
         print(f"[sync] global -> {len(synced)} cmds")
