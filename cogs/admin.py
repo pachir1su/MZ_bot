@@ -1,3 +1,4 @@
+# cogs/admin.py
 import os, aiosqlite, json, time, re
 import discord
 from discord import app_commands
@@ -78,7 +79,7 @@ def settings_embed(s: dict) -> discord.Embed:
     em.add_field(name="모드명", value=s["mode_name"], inline=False)
     return em
 
-# ───────── 쿨타임 초기화 ─────────
+# 쿨타임 초기화
 async def reset_cooldown(gid: int, actor_id: int, which: str, target_uid: int | None, reason: str | None = None):
     which = which.lower().strip()
     if which not in ("money", "attend", "both"):
@@ -103,6 +104,19 @@ async def reset_cooldown(gid: int, actor_id: int, which: str, target_uid: int | 
         )
         await db.commit()
 
+# ───────── 도움말 임베드 ─────────
+def admin_help_embed() -> discord.Embed:
+    em = discord.Embed(title="도움말 — 슬래시 명령이 안 보일 때", color=0x95a5a6)
+    em.description = (
+        "• **데스크톱(PC)**: Discord 창에서 **Ctrl+R**(하드 리로드)로 명령 목록을 새로 고침하세요.\n"
+        "• **모바일**: 앱을 완전히 종료 후 다시 실행하면 목록이 갱신됩니다.\n"
+        "• **전파 지연**: **전역(Global)** 명령은 반영까지 시간이 걸릴 수 있습니다(보통 최대 1시간). "
+        "**길드(Guild)** 명령은 즉시 반영됩니다.\n"
+        "• **개발 시 권장**: `.env`에 `DEV_GUILD_ID`를 설정하고, 봇이 **길드 싱크**를 수행하도록 하세요.\n"
+        "• **권한 확인**: 서버/채널 권한에서 **애플리케이션 명령어 사용(Use Application Commands)** 이 허용되어 있는지 확인하세요."
+    )
+    return em
+
 # ───────── 모달들 ─────────
 class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
     value = discord.ui.TextInput(label="값", placeholder="예) 2000 / 35(%) / 이벤트 모드", required=True)
@@ -112,14 +126,13 @@ class ConfigValueModal(discord.ui.Modal, title="설정 값 입력"):
         self.key = key
         self.key_label = key_label
         self.gid = gid
-        self.title = f"{key_label} 변경"
+        self.title = f"{self.key_label} 변경"
 
     async def on_submit(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
             await set_setting_field(db, self.gid, self.key, str(self.value))
             s = await get_settings(db, self.gid)
-        em = settings_embed(s)
-        em.title = f"{self.key_label} 변경 완료"
+        em = settings_embed(s); em.title = f"{self.key_label} 변경 완료"
         await interaction.response.send_message(embed=em, ephemeral=True)
 
 class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
@@ -160,7 +173,7 @@ class TargetUserSelect(discord.ui.UserSelect):
         super().__init__(placeholder="대상 선택(미선택 = 전체)", min_values=0, max_values=1, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        view: AdminMenu = self.view  # type: ignore
+        view: "AdminMenu" = self.view  # type: ignore
         view.target_user_id = self.values[0].id if self.values else None
         picked = interaction.guild.get_member(view.target_user_id).display_name if view.target_user_id else "서버 전체"
         await interaction.response.send_message(f"대상 선택: **{picked}**", ephemeral=True)
@@ -174,7 +187,7 @@ class AdminMenu(discord.ui.View):
         # 행 0: 셀렉트 (단독)
         self.add_item(TargetUserSelect())
 
-    # 행 1: 설정 관련 버튼들 (최대 5개까지 같은 행에 공존 가능)
+    # 행 1: 설정 관련 버튼들
     @discord.ui.button(label="설정 보기", style=discord.ButtonStyle.primary, row=1)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -241,8 +254,13 @@ class AdminMenu(discord.ui.View):
         scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
-    # 행 4: 닫기
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)
+    # 행 4: 도움말 버튼 (새로 추가)
+    @discord.ui.button(label="도움말", style=discord.ButtonStyle.secondary, row=4)
+    async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=admin_help_embed(), ephemeral=True)
+
+    # 행 5: 닫기 (행 번호를 한 칸 내렸습니다)
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=5)
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
