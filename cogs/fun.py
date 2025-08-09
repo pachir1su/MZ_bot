@@ -1,3 +1,4 @@
+# cogs/fun.py
 import random
 import discord
 from discord import app_commands
@@ -17,10 +18,6 @@ ANSWERS = [
 async def mz_ask(interaction: discord.Interaction, question: str):
     pick = random.choice(ANSWERS)
     await interaction.response.send_message(f"질문: {question}\n면진이: {pick}")
-
-# 한글 표기(Localization)
-mz_ask.name_localizations = {"ko": "면진질문"}
-mz_ask.description_localizations = {"ko": "질문을 보내면 랜덤으로 대답합니다"}
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_ask)
