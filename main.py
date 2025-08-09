@@ -1,5 +1,6 @@
 # main.py
 import os
+import importlib.util  # ← 추가: 모듈 존재 여부 확인용
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -7,6 +8,10 @@ from dotenv import load_dotenv
 import aiosqlite
 
 DB_PATH = "economy.db"
+
+# ───────── 유틸: 모듈 존재 검사 ─────────
+def module_exists(mod: str) -> bool:
+    return importlib.util.find_spec(mod) is not None
 
 # ───────── 번역기 ─────────
 class MZTranslator(app_commands.Translator):
@@ -36,11 +41,11 @@ class MZTranslator(app_commands.Translator):
                     "mz_ask":          "면진질문",
 
                     # 신규/확장
+                    "mz_tarot":        "면진타로",
+                    "mz_genie":        "면진지니",
                     "mz_stock":        "면진주식",
                     "mz_coin":         "면진코인",
                     "mz_bankruptcy":   "파산신청",
-                    "mz_tarot":        "면진타로",
-                    "mz_genie":        "면진지니",
                 }
                 return mapping.get(data.name)
 
@@ -58,11 +63,11 @@ class MZTranslator(app_commands.Translator):
                     "mz_ask":          "질문을 보내면 랜덤으로 대답합니다",
 
                     # 신규/확장
-                    "mz_stock":        "가상 주식 투자(5초 후 결과 공개, 퍼센트 손익)",
-                    "mz_coin":         "가상 코인 러시(잭팟 계단형, 5초 후 결과 공개)",
-                    "mz_bankruptcy":   "잔액이 음수일 때 10분마다 부채 복구 시도",
-                    "mz_tarot":        "타로 3장 해석(5초 후 공개, 결과는 채널에 표시)",
+                    "mz_tarot":        "타로 3장 해석(5초 후 공개, 채널에 표시)",
                     "mz_genie":        "면진지니: Gemini로 짧은 답변 생성",
+                    "mz_stock":        "가상 주식 투자(5초 후 결과 공개, 퍼센트 손익)",
+                    "mz_coin":         "가상 코인 러시(잭팟 계단형, 5초 후 공개)",
+                    "mz_bankruptcy":   "잔액이 음수일 때 10분마다 부채 복구 시도",
                 }
                 return desc_map.get(data.name)
 
@@ -91,12 +96,10 @@ DEV_GUILD_ID = os.getenv("DEV_GUILD_ID", "").strip()
 INTENTS = discord.Intents.default()
 INTENTS.message_content = False  # 슬래시 중심
 
-# command_prefix는 None이면 에러가 나므로 안전값 사용
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
 # ───────── DB 초기화 ─────────
 async def init_db():
-    # models.sql을 읽어 테이블 보장
     if not os.path.exists("models.sql"):
         return
     async with aiosqlite.connect(DB_PATH) as db:
@@ -121,8 +124,13 @@ async def setup_hook():
     await bot.load_extension("cogs.admin")
     await bot.load_extension("cogs.fun")
 
-    # 신규: 주식/코인/파산
-    await bot.load_extension("cogs.markets")
+    # 신규: 타로/지니/마켓
+    await bot.load_extension("cogs.tarot")      # 면진타로
+    if module_exists("cogs.genie"):             # 면진지니가 있을 때만 로드
+        await bot.load_extension("cogs.genie")
+    else:
+        print("[load] cogs.genie not found — skipping")
+    await bot.load_extension("cogs.markets")    # 면진주식/면진코인/파산신청
 
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
@@ -131,10 +139,12 @@ async def setup_hook():
     gids = [g.strip() for g in DEV_GUILD_ID.split(",") if g.strip()]
     if gids:
         for gid in gids:
-            synced = await bot.tree.sync(guild=discord.Object(id=int(gid)))
-            print(f"[sync] guild {gid} -> {len(synced)} cmds")
+            gobj = discord.Object(id=int(gid))
+            bot.tree.copy_global_to(guild=gobj)        # 글로벌 커맨드를 길드로 복사
+            synced = await bot.tree.sync(guild=gobj)   # 길드 즉시 싱크
+            print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
     else:
-        synced = await bot.tree.sync()
+        synced = await bot.tree.sync()                 # 글로벌 싱크(수 분 지연 가능)
         print(f"[sync] global -> {len(synced)} cmds")
 
 bot.setup_hook = setup_hook  # discord.py 2.3~ 스타일 대응
