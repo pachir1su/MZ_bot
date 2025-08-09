@@ -1,6 +1,6 @@
 # main.py
 import os
-import importlib.util  # ← 추가: 모듈 존재 여부 확인용
+import importlib.util
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -9,7 +9,6 @@ import aiosqlite
 
 DB_PATH = "economy.db"
 
-# ───────── 유틸: 모듈 존재 검사 ─────────
 def module_exists(mod: str) -> bool:
     return importlib.util.find_spec(mod) is not None
 
@@ -27,7 +26,7 @@ class MZTranslator(app_commands.Translator):
         loc = context.location
         data = context.data
 
-        # 명령어 이름 한글화
+        # 명령어 이름 한글화 (OK)
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
@@ -39,8 +38,6 @@ class MZTranslator(app_commands.Translator):
                     "mz_transfer":     "면진송금",
                     "mz_admin":        "면진관리자",
                     "mz_ask":          "면진질문",
-
-                    # 신규/확장
                     "mz_tarot":        "면진타로",
                     "mz_genie":        "면진지니",
                     "mz_stock":        "면진주식",
@@ -49,7 +46,7 @@ class MZTranslator(app_commands.Translator):
                 }
                 return mapping.get(data.name)
 
-        # 설명 한글화
+        # 설명 한글화 (OK)
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
@@ -61,8 +58,6 @@ class MZTranslator(app_commands.Translator):
                     "mz_transfer":     "서버 멤버에게 코인을 송금합니다",
                     "mz_admin":        "관리자 메뉴 열기(관리자 전용)",
                     "mz_ask":          "질문을 보내면 랜덤으로 대답합니다",
-
-                    # 신규/확장
                     "mz_tarot":        "타로 3장 해석(5초 후 공개, 채널에 표시)",
                     "mz_genie":        "면진지니: Gemini로 짧은 답변 생성",
                     "mz_stock":        "가상 주식 투자(5초 후 결과 공개, 퍼센트 손익)",
@@ -71,19 +66,18 @@ class MZTranslator(app_commands.Translator):
                 }
                 return desc_map.get(data.name)
 
-        # 파라미터 이름/설명 한글화
-        if loc is app_commands.TranslationContextLocation.parameter_name:
-            if isinstance(data, app_commands.Parameter):
-                if data.name == "amount": return "금액"
-                if data.name == "user":   return "대상"
-                if data.name == "member": return "받는 사람"
-                if data.name == "question": return "질문"
-                if data.name == "symbol": return "종목/코인"
+        # ⚠ 파라미터 이름 로컬라이즈 금지 (Discord 검증에 막힘)
+        # if loc is app_commands.TranslationContextLocation.parameter_name:
+        #     ...
 
+        # 파라미터 설명 한글화 (OK)
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount": return "정수 금액(최소 베팅 이상)"
                 if data.name == "symbol": return "종목(주식)/코인(가상 자산)"
+                if data.name == "question": return "질문 내용"
+                if data.name == "member": return "받는 사람 선택"
+                if data.name == "user": return "대상 사용자"
 
         return None
 
@@ -115,7 +109,7 @@ async def on_ready():
 async def setup_hook():
     await init_db()
 
-    # 코그 로드
+    # 기존 코그
     await bot.load_extension("cogs.economy")
     try:
         await bot.load_extension("cogs.games")
@@ -124,9 +118,9 @@ async def setup_hook():
     await bot.load_extension("cogs.admin")
     await bot.load_extension("cogs.fun")
 
-    # 신규: 타로/지니/마켓
+    # 신규 코그
     await bot.load_extension("cogs.tarot")      # 면진타로
-    if module_exists("cogs.genie"):             # 면진지니가 있을 때만 로드
+    if module_exists("cogs.genie"):             # 면진지니(있을 때만)
         await bot.load_extension("cogs.genie")
     else:
         print("[load] cogs.genie not found — skipping")
@@ -135,19 +129,19 @@ async def setup_hook():
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
 
-    # 개발 길드 우선 싱크(즉시 반영)
+    # 개발 길드 우선 싱크
     gids = [g.strip() for g in DEV_GUILD_ID.split(",") if g.strip()]
     if gids:
         for gid in gids:
             gobj = discord.Object(id=int(gid))
-            bot.tree.copy_global_to(guild=gobj)        # 글로벌 커맨드를 길드로 복사
-            synced = await bot.tree.sync(guild=gobj)   # 길드 즉시 싱크
+            bot.tree.copy_global_to(guild=gobj)
+            synced = await bot.tree.sync(guild=gobj)
             print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
     else:
-        synced = await bot.tree.sync()                 # 글로벌 싱크(수 분 지연 가능)
+        synced = await bot.tree.sync()
         print(f"[sync] global -> {len(synced)} cmds")
 
-bot.setup_hook = setup_hook  # discord.py 2.3~ 스타일 대응
+bot.setup_hook = setup_hook
 
 # ───────── 실행 ─────────
 bot.run(TOKEN)
