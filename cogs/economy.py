@@ -2,11 +2,12 @@ import os
 import time
 import json
 import aiosqlite
+from pathlib import Path
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
-DB_PATH = "economy.db"
+DB_PATH = str(Path(__file__).resolve().parent.parent / "economy.db")
 
 # 지급/쿨타임 기본값
 MONEY_COOLDOWN = 600       # 10분

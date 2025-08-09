@@ -1,10 +1,11 @@
 import os, aiosqlite, json, time
+from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timezone
 
-DB_PATH = "economy.db"
+DB_PATH = str(Path(__file__).resolve().parent.parent / "economy.db")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or "0")
 
 async def try_send_log(client: discord.Client, embed: discord.Embed):
