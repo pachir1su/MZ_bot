@@ -142,7 +142,7 @@ class BalanceAmountModal(discord.ui.Modal, title="잔액 입력"):
     def __init__(self, gid: int, uid: int, op: str, user_label: str):
         super().__init__(timeout=180)
         self.gid, self.uid, self.op, self.user_label = gid, uid, op, user_label
-        self.title = f"{user_label} · {op.upper()}"
+        self.title = f"{user_label} · {op.UPPER()}"
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -254,13 +254,12 @@ class AdminMenu(discord.ui.View):
         scope = "서버 전체" if self.target_user_id is None else (interaction.guild.get_member(self.target_user_id).display_name or str(self.target_user_id))
         await interaction.response.send_message(f"✅ **돈줘/출첵** 쿨타임 초기화 완료 · 대상: {scope}", ephemeral=True)
 
-    # 행 4: 도움말 버튼 (새로 추가)
+    # 행 4: 도움말 & 닫기 (0~4만 허용)
     @discord.ui.button(label="도움말", style=discord.ButtonStyle.secondary, row=4)
     async def help_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=admin_help_embed(), ephemeral=True)
 
-    # 행 5: 닫기 (행 번호를 한 칸 내렸습니다)
-    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=5)
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=4)  # ← row=4로 수정
     async def close_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
