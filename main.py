@@ -57,7 +57,7 @@ class MZTranslator(app_commands.Translator):
             if isinstance(data, app_commands.Parameter):
                 if data.name == "amount":   return "금액"
                 if data.name == "user":     return "대상"
-                if data.name == "member":   return "받는 사람"
+                if data.name == "member":   return "받는사람"
                 if data.name == "question": return "질문"
 
         if loc is app_commands.TranslationContextLocation.parameter_description:
@@ -128,3 +128,4 @@ bot.setup_hook = setup_hook  # discord.py 2.3~ 스타일 대응
 
 # ───────── 실행 ─────────
 bot.run(TOKEN)
+
