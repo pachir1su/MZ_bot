@@ -28,3 +28,6 @@ pip install -r requirements.txt
 - 출석 보상, 송금 및 잔액 조회
 - 베팅과 순위 확인 등 경제 시스템
 - 관리자 전용 설정 및 질의응답 기능
+
+## 봇 초대 링크
+https://discord.com/oauth2/authorize?client_id=1403372955546812467
