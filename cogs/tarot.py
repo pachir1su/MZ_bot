@@ -2,7 +2,8 @@
 # /면진타로 (mz_tarot)
 # - spread: 1장(조언) 또는 3장(과거/현재/미래)
 # - question: 질문(선택)
-# - public: 채널 공개 여부 (기본 비공개)
+# - public: 채널 공개 여부 (기본 공개=True)
+
 import os, secrets, asyncio
 from typing import List, Tuple, Optional
 
@@ -12,9 +13,9 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted, GoogleAPIError
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-# 안정성 우선: 기본은 flash, 필요시 관리자에서 pro로 바꿔도 됨
+# 안정성/속도 우선
 PRIMARY_MODEL = "gemini-1.5-flash"
-FALLBACK_MODEL = "gemini-1.5-flash"  # 동일 유지(원하면 pro→flash 대체 시 사용)
+FALLBACK_MODEL = "gemini-1.5-flash"  # 필요 시 pro↔flash 폴백 구조 유지
 
 # ── 덱 구성 ──────────────────────────────────────────────
 MAJOR = [
@@ -63,7 +64,7 @@ SpreadChoice = app_commands.Choice[str]
 @app_commands.command(name="mz_tarot", description="타로 카드로 상황을 해석합니다 (Gemini)")
 @app_commands.describe(
     question="질문/상황(선택, 비우면 일반 운세)",
-    public="채널에 공개할지 여부(기본 비공개)"
+    public="채널에 공개할지 여부(기본 공개)"
 )
 @app_commands.choices(
     spread=[
@@ -76,7 +77,7 @@ async def mz_tarot(
     interaction: discord.Interaction,
     spread: SpreadChoice,
     question: Optional[str] = None,
-    public: Optional[bool] = False,
+    public: Optional[bool] = True,   # ✅ 기본값을 공개(True)로 변경
 ):
     await interaction.response.defer(ephemeral=not public, thinking=True)
 
@@ -111,7 +112,7 @@ async def mz_tarot(
         )
     prompt = f"{system}\n\n{instr}"
 
-    # 카드 정보 임베드(콘텐츠는 뒤에서 전송)
+    # 카드 정보 임베드
     em = discord.Embed(title="타로 리딩 결과", color=0x9b59b6)
     em.add_field(name="스프레드", value=("1장 조언" if n == 1 else "3장(과거/현재/미래)"), inline=True)
     em.add_field(name="질문", value=(question or "일반 운세"), inline=False)
@@ -126,42 +127,31 @@ async def mz_tarot(
         try:
             text = await _gemini_call(prompt, PRIMARY_MODEL)
         except ResourceExhausted as e:
-            # google가 내려주는 retry_delay가 있으면 그만큼 대기 후 1회 재시도
             retry_seconds = getattr(getattr(e, "retry_delay", None), "seconds", None)
-            if retry_seconds is None:
-                retry_seconds = 20  # 안전 기본값
-            wait = min(int(retry_seconds), 60)  # 상호작용 제한 내에서만 대기
+            wait = min(int(retry_seconds or 20), 60)  # 상호작용 제한 내에서만 대기
             note = f"사용량 한도에 도달하여 {wait}초 대기 후 재시도합니다."
             await interaction.followup.send(embed=_error_embed("잠시 대기 중", note), ephemeral=not public)
             await asyncio.sleep(wait)
-            # 1회 재시도(동일 모델), 실패 시 폴백
             try:
                 text = await _gemini_call(prompt, PRIMARY_MODEL)
             except ResourceExhausted:
-                # 폴백 모델로 한 번 더 시도
                 if FALLBACK_MODEL != PRIMARY_MODEL:
                     try:
                         text = await _gemini_call(prompt, FALLBACK_MODEL)
-                    except Exception as e2:
-                        msg = (
-                            "현재 Gemini 쿼터가 가득 찼습니다. 잠시 후 다시 시도해 주세요.\n"
-                            "자세한 한도 정책은 공식 문서를 참고해 주세요."
-                        )
+                    except Exception:
+                        msg = "현재 Gemini 쿼터가 가득 찼습니다. 잠시 후 다시 시도해 주세요."
                         await interaction.followup.send(embed=_error_embed("요청 한도 초과(429)", msg), ephemeral=not public)
                         return
                 else:
-                    msg = (
-                        "현재 Gemini 쿼터가 가득 찼습니다. 잠시 후 다시 시도해 주세요.\n"
-                        "자세한 한도 정책은 공식 문서를 참고해 주세요."
-                    )
+                    msg = "현재 Gemini 쿼터가 가득 찼습니다. 잠시 후 다시 시도해 주세요."
                     await interaction.followup.send(embed=_error_embed("요청 한도 초과(429)", msg), ephemeral=not public)
                     return
-        except GoogleAPIError as e:
-            msg = f"외부 서비스 응답이 원활하지 않습니다. 잠시 후 다시 시도해 주세요. ({type(e).__name__})"
+        except GoogleAPIError:
+            msg = "외부 서비스 응답이 원활하지 않습니다. 잠시 후 다시 시도해 주세요."
             await interaction.followup.send(embed=_error_embed("서비스 지연", msg), ephemeral=not public)
             return
-        except Exception as e:
-            msg = f"처리 중 문제가 발생했습니다. ({type(e).__name__})"
+        except Exception:
+            msg = "처리 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
             await interaction.followup.send(embed=_error_embed("처리 실패", msg), ephemeral=not public)
             return
 
@@ -171,7 +161,7 @@ async def mz_tarot(
     for part in chunks(text):
         await interaction.followup.send(part, ephemeral=not public)
 
-# 에러 핸들러: 여기서는 추가 재전파하지 않음(무한로딩 방지)
+# 에러 핸들러: 무한로딩 방지
 @mz_tarot.error
 async def _tarot_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     try:
