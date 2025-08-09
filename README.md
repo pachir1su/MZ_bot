@@ -32,6 +32,8 @@ pip install -r requirements.txt
 ## 봇 초대 링크
 https://discord.com/oauth2/authorize?client_id=1403372955546812467
 
+---
+
 ### Memo
 - 닉네임 표기 안정화 해야 함
 - 관리자 메뉴 메인 / 서브 분리
