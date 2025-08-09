@@ -38,7 +38,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# ── 상품 정의 (퍼센트 구간은 관리자에서 바꿀 수 있도록 이후 확장 예정) ─────
+# ── 상품 정의 ────────────────────────────────────────────
 STOCKS = {
     "성현전자":  (-20.0, +20.0),
     "배달의 승기":(-30.0, +30.0),
@@ -51,13 +51,15 @@ COINS = {
     "승철코인":  (-300.0, +1000.0),
 }
 
+# ✅ symbol 드롭다운 선택지
+STOCK_CHOICES = [app_commands.Choice(name=n, value=n) for n in STOCKS.keys()]
+COIN_CHOICES  = [app_commands.Choice(name=n, value=n) for n in COINS.keys()]
+
 def pick_rate(lo: float, hi: float) -> float:
-    """한 자리 소수 고정. 희귀 이벤트(아주 낮은 확률) 약간 가중 가능."""
+    """한 자리 소수 고정. 극단값은 희귀하게만 나오도록 균등 추출."""
     if hi < lo: lo, hi = hi, lo
-    # 균등 추출
-    raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
-    # 소수 1자리 반올림
-    return round(raw, 1)
+    raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)  # 균등
+    return round(raw, 1)  # 소수 1자리
 
 # ── 공용: 주문 접수 임베드 ───────────────────────────────
 async def send_order_embed(interaction: discord.Interaction, title: str, fields: list[tuple[str, str]]):
@@ -65,7 +67,10 @@ async def send_order_embed(interaction: discord.Interaction, title: str, fields:
     for name, value in fields:
         em.add_field(name=name, value=value)
     em.add_field(name="\u200b", value="**5초 후 결과가 공개됩니다.**", inline=False)
-    em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else discord.Embed.Empty)
+    try:
+        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception:
+        em.set_author(name=interaction.user.display_name)
     em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
     await interaction.response.send_message(embed=em)
 
@@ -81,6 +86,7 @@ async def send_insufficient(interaction: discord.Interaction, balance: int, amou
 # ── /면진주식 ────────────────────────────────────────────
 @app_commands.command(name="mz_stock", description="가상 주식 투자(5초 후 결과 공개, 퍼센트 손익)")
 @app_commands.describe(symbol="종목(성현전자/배달의 승기/대이식스/재구식품)", amount="베팅 금액(정수)")
+@app_commands.choices(symbol=STOCK_CHOICES)   # ✅ 드롭다운
 async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
     symbol = symbol.strip()
@@ -108,7 +114,7 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     # 결과 계산
     await asyncio.sleep(5)
     lo, hi = STOCKS[symbol]
-    rate = pick_rate(lo, hi)             # % (소수1자리)
+    rate = pick_rate(lo, hi)                   # % (소수1자리)
     delta = int(round(amount * rate / 100.0))  # 손익
     kind = "stock_win" if delta >= 0 else "stock_lose"
 
@@ -116,7 +122,7 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
-        new_bal = u["balance"] + delta   # 손익만 반영(원금 차감 없음)
+        new_bal = u["balance"] + delta         # 손익만 반영(원금 차감 없음)
         await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
         await write_ledger(db, gid, uid, kind, delta, new_bal, {"symbol": symbol, "amount": amount, "rate_pct": rate})
         await db.commit()
@@ -124,7 +130,10 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     # 결과 임베드
     color = 0x2ecc71 if delta >= 0 else 0xe74c3c
     em = discord.Embed(title=f"주식 결과 — {symbol}", color=color)
-    em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else discord.Embed.Empty)
+    try:
+        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception:
+        em.set_author(name=interaction.user.display_name)
     em.add_field(name="변화율", value=f"{rate:+.1f}%", inline=True)
     em.add_field(name="손익",   value=f"{'+' if delta>=0 else ''}{won(delta)}", inline=True)
     em.add_field(name="현재 잔액", value=won(new_bal), inline=False)
@@ -134,6 +143,7 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
 # ── /면진코인 ────────────────────────────────────────────
 @app_commands.command(name="mz_coin", description="가상 코인 러시(잭팟 계단형, 5초 후 공개)")
 @app_commands.describe(symbol="코인(건영코인/면진코인/승철코인)", amount="베팅 금액(정수)")
+@app_commands.choices(symbol=COIN_CHOICES)    # ✅ 드롭다운
 async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
     symbol = symbol.strip()
@@ -161,21 +171,24 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
     # 결과
     await asyncio.sleep(5)
     lo, hi = COINS[symbol]
-    rate = pick_rate(lo, hi)               # % (소수1자리)
+    rate = pick_rate(lo, hi)                   # % (소수1자리)
     delta = int(round(amount * rate / 100.0))
     kind = "coin_win" if delta >= 0 else "coin_lose"
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
-        new_bal = u["balance"] + delta     # 손익만 반영
+        new_bal = u["balance"] + delta         # 손익만 반영
         await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
         await write_ledger(db, gid, uid, kind, delta, new_bal, {"coin": symbol, "amount": amount, "rate_pct": rate})
         await db.commit()
 
     color = 0x2ecc71 if delta >= 0 else 0xe74c3c
     em = discord.Embed(title=f"코인 결과 — {symbol}", color=color)
-    em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else discord.Embed.Empty)
+    try:
+        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception:
+        em.set_author(name=interaction.user.display_name)
     em.add_field(name="결과 수익률", value=f"{rate:+.1f}%", inline=True)
     em.add_field(name="손익",       value=f"{'+' if delta>=0 else ''}{won(delta)}", inline=True)
     em.add_field(name="현재 잔액",   value=won(new_bal), inline=False)
@@ -185,7 +198,7 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
 # ── /면진파산 ────────────────────────────────────────────
 @app_commands.command(name="mz_bankruptcy", description="잔액이 음수일 때 10분마다 부채 복구 시도")
 async def mz_bankruptcy(interaction: discord.Interaction):
-    """부채 복구: 0% / 50% / 100% (희귀하게 극단값), 10분 쿨다운은 다른 곳에서 컨트롤 가능"""
+    """부채 복구: 0% / 50% / 100% (희귀하게 극단값). 하루 한도 없음, 10분 쿨다운은 다른 로직에서 통제."""
     gid, uid = interaction.guild.id, interaction.user.id
     mode = await get_mode_name(gid)
 
@@ -200,7 +213,7 @@ async def mz_bankruptcy(interaction: discord.Interaction):
             em.set_footer(text=footer_text(bal, mode))
             return await interaction.response.send_message(embed=em)
 
-        # 확률: 100%와 0%는 희귀
+        # 확률: 100%/0%는 희귀
         roll = secrets.randbelow(1000)  # 0..999
         if roll < 30:
             recover_ratio = 1.0
@@ -222,7 +235,10 @@ async def mz_bankruptcy(interaction: discord.Interaction):
               else "승인(부채 50% 복구)" if recover_ratio == 0.5
               else "거절")
     em = discord.Embed(title=title, color=color)
-    em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else discord.Embed.Empty)
+    try:
+        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception:
+        em.set_author(name=interaction.user.display_name)
     em.add_field(name="결과", value=result, inline=True)
     em.add_field(name="변화", value=f"{'+' if recovered>0 else ''}{won(recovered)}", inline=True)
     em.add_field(name="현재 잔액", value=won(new_bal), inline=False)
