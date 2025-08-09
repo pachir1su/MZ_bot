@@ -3,7 +3,6 @@
 # - spread: 1장(조언) 또는 3장(과거/현재/미래)
 # - question: 질문(선택)
 # - public: 채널 공개 여부 (기본 비공개)
-
 import os, secrets
 from typing import List, Tuple, Optional
 
@@ -12,7 +11,7 @@ from discord import app_commands
 import google.generativeai as genai
 
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-MODEL_NAME = "gemini-1.5-pro"   # 설명력 우선, 속도 원하면 flash로 변경
+MODEL_NAME = "gemini-1.5-pro"   # 설명력 우선, 속도 필요시 "gemini-1.5-flash"
 
 # ── 덱 구성 ──────────────────────────────────────────────
 MAJOR = [
@@ -70,10 +69,7 @@ async def mz_tarot(
     picks = draw_cards(n)
 
     # 포지션 라벨
-    if n == 1:
-        positions = ["Advice"]
-    else:
-        positions = ["Past", "Present", "Future"]
+    positions = ["Advice"] if n == 1 else ["Past", "Present", "Future"]
 
     # 카드 텍스트(예: "The Sun (Reversed)")
     labeled = []
