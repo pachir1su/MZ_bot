@@ -1,9 +1,10 @@
 import aiosqlite, secrets, json, time
+from pathlib import Path
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
-DB_PATH = "economy.db"
+DB_PATH = str(Path(__file__).resolve().parent.parent / "economy.db")
 
 # ── 표시 유틸 ───────────────────────────────────────────
 KST = timezone(timedelta(hours=9))

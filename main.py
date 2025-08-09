@@ -1,12 +1,13 @@
 # main.py
 import os
+from pathlib import Path
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 import aiosqlite
 
-DB_PATH = "economy.db"
+DB_PATH = str(Path(__file__).resolve().parent / "economy.db")
 
 # ───────── 번역기 ─────────
 class MZTranslator(app_commands.Translator):
