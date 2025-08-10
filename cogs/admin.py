@@ -1,4 +1,4 @@
-import os, aiosqlite, json, time
+import os, aiosqlite, json, time, math
 import discord
 from discord import app_commands
 
@@ -315,7 +315,7 @@ class CooldownView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await interaction.edit_original_response(embed=admin_main_embed(), view=AdminMainView(self.gid), content=None)
 
-# ───────── 서브 뷰: 도구 (누락되었던 부분 추가) ─────────
+# ───────── 서브 뷰: 도구 ─────────
 class ToolsView(discord.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=300)
@@ -341,121 +341,425 @@ class ToolsView(discord.ui.View):
             embed=admin_main_embed(), view=AdminMainView(self.gid), content=None
         )
 
-# ───────── 마켓 토글 모달 ─────────
-class MarketToggleModal(discord.ui.Modal, title="마켓 활성/비활성 토글"):
-    t_type = discord.ui.TextInput(label="종류(stock/coin)")
-    t_name = discord.ui.TextInput(label="이름(정확히)")
+# ═══════════════════════════════════════════════════════════════════════════
+#                               MarketView v2
+#   - 탭(주식/코인) · 검색 · 페이지네이션 · 다중선택
+#   - 단건/일괄: 편집/삭제/활성토글/복제/프리셋
+#   - 저장 전 미리보기(확인) · 30초 Undo
+# ═══════════════════════════════════════════════════════════════════════════
 
-    def __init__(self, gid: int):
+PAGE_SIZE = 25  # Discord StringSelect 옵션 최대치
+UNDO_TTL = 30.0 # 초
+
+# 간단 Undo: SQL 역연산들 저장
+class UndoView(discord.ui.View):
+    def __init__(self, sql_ops: list[tuple[str, tuple]], title: str):
+        super().__init__(timeout=UNDO_TTL)
+        self.sql_ops = sql_ops
+        self.title = title
+
+    @discord.ui.button(label="실행 취소", style=discord.ButtonStyle.secondary)
+    async def do_undo(self, interaction: discord.Interaction, _):
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                # 역순 실행 안전
+                for sql, args in reversed(self.sql_ops):
+                    await db.execute(sql, args)
+                await db.commit()
+            await interaction.response.edit_message(content=f"↩️ Undo 완료: {self.title}", view=None)
+        except Exception as e:
+            await interaction.response.edit_message(content=f"Undo 중 오류: {type(e).__name__}: {e}", view=None)
+
+# 공통 쿼리
+async def count_items(gid: int, typ: str, keyword: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        like = f"%{keyword.strip()}%" if keyword else "%"
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM market_items WHERE guild_id=? AND type=? AND name LIKE ?",
+            (gid, typ, like)
+        )
+        return (await cur.fetchone())[0]
+
+async def list_items(gid: int, typ: str, keyword: str, page: int, limit: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        like = f"%{keyword.strip()}%" if keyword else "%"
+        offset = page * limit
+        cur = await db.execute(
+            "SELECT name,range_lo,range_hi,enabled FROM market_items "
+            "WHERE guild_id=? AND type=? AND name LIKE ? "
+            "ORDER BY name LIMIT ? OFFSET ?",
+            (gid, typ, like, limit, offset)
+        )
+        rows = await cur.fetchall()
+        return [{"name": n, "lo": lo, "hi": hi, "en": en} for (n,lo,hi,en) in rows]
+
+# 프리셋 조정 함수들
+def normalize_percent(txt: str) -> float:
+    s = txt.strip().replace("%","")
+    return float(s)
+
+def preset_apply(lo: float, hi: float, kind: str) -> tuple[float,float]:
+    # kind: widen10, narrow10, center0, tilt_pos, tilt_neg
+    width = hi - lo
+    mid = (hi + lo)/2
+    if kind == "widen10":
+        lo2 = lo - width*0.1; hi2 = hi + width*0.1
+    elif kind == "narrow10":
+        lo2 = lo + width*0.1; hi2 = hi - width*0.1
+        if lo2 >= hi2: lo2, hi2 = lo, hi  # 보호
+    elif kind == "center0":
+        # 폭 유지, 중심을 0으로
+        lo2 = -width/2; hi2 = width/2
+    elif kind == "tilt_pos":
+        # 중심을 +10%만큼 이동(폭은 동일) — 절대치 기준이 아닌 상대폭 10%
+        shift = width*0.1
+        lo2 = lo + shift; hi2 = hi + shift
+    elif kind == "tilt_neg":
+        shift = width*0.1
+        lo2 = lo - shift; hi2 = hi - shift
+    else:
+        lo2, hi2 = lo, hi
+    return (round(lo2,1), round(hi2,1))
+
+def ev_of(lo: float, hi: float) -> float:
+    return round((lo + hi)/2.0, 3)
+
+# 편집 미리보기 → 확인 단계
+class EditConfirmView(discord.ui.View):
+    def __init__(self, gid: int, typ: str, name: str, lo: float, hi: float, en: int):
         super().__init__(timeout=120)
-        self.gid = gid
+        self.gid, self.typ, self.name, self.lo, self.hi, self.en = gid, typ, name, lo, hi, en
 
-    async def on_submit(self, interaction: discord.Interaction):
-        typ = str(self.t_type).strip().lower()
-        name = str(self.t_name).strip()
-        if typ not in ("stock","coin"):
-            return await interaction.response.send_message("type은 stock/coin만 허용됩니다.", ephemeral=True)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "SELECT enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
-                (self.gid, typ, name)
-            )
-            row = await cur.fetchone()
-            if not row:
-                return await interaction.response.send_message("해당 항목이 없습니다.", ephemeral=True)
-            new_en = 0 if row[0] else 1
-            await db.execute(
-                "UPDATE market_items SET enabled=? WHERE guild_id=? AND type=? AND name=?",
-                (new_en, self.gid, typ, name)
-            )
-            await db.commit()
-        await interaction.response.send_message(f"✅ {name} → {'on' if new_en else 'off'}", ephemeral=True)
-
-# ───────── 서브 뷰: 마켓(주식/코인) 편집 ─────────
-class MarketModal(discord.ui.Modal, title="마켓 항목"):
-    t_type  = discord.ui.TextInput(label="종류(stock/coin)")
-    t_name  = discord.ui.TextInput(label="이름(예: 성현전자)")
-    t_lo    = discord.ui.TextInput(label="최소 변화율(예: -20.0)", required=False)
-    t_hi    = discord.ui.TextInput(label="최대 변화율(예: 20.0)", required=False)
-    t_enable= discord.ui.TextInput(label="활성화(1/0)", default="1")
-
-    def __init__(self, gid: int, mode: str):
-        super().__init__(timeout=180)
-        self.gid = gid
-        self.mode = mode  # 'add' | 'del'
-        self.title = f"마켓 {mode.upper()}"
-
-    async def on_submit(self, interaction: discord.Interaction):
-        typ = str(self.t_type).strip().lower()
-        name = str(self.t_name).strip()
-        if typ not in ("stock","coin"):
-            return await interaction.response.send_message("type은 stock/coin만 허용됩니다.", ephemeral=True)
+    @discord.ui.button(label="저장", style=discord.ButtonStyle.success, row=0)
+    async def save(self, interaction: discord.Interaction, _):
+        # 이전 스냅샷 확보(Undo 대비)
+        sql_ops: list[tuple[str, tuple]] = []
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
-            if self.mode == "del":
-                await db.execute("DELETE FROM market_items WHERE guild_id=? AND type=? AND name=?",
-                                 (self.gid, typ, name))
-            else:
-                # 공란은 기존 값 유지
-                cur = await db.execute(
-                    "SELECT range_lo, range_hi FROM market_items WHERE guild_id=? AND type=? AND name=?",
-                    (self.gid, typ, name)
-                )
-                old = await cur.fetchone()
-                lo_txt = str(self.t_lo).strip()
-                hi_txt = str(self.t_hi).strip()
-                lo = float(lo_txt) if lo_txt else (old[0] if old else 0.0)
-                hi = float(hi_txt) if hi_txt else (old[1] if old else 0.0)
-                enable = 1 if str(self.t_enable).strip() == "1" else 0
-                await db.execute("""
-                    INSERT INTO market_items(guild_id,type,name,range_lo,range_hi,enabled)
-                    VALUES(?,?,?,?,?,?)
-                    ON CONFLICT(guild_id,type,name) DO UPDATE SET
-                      range_lo=excluded.range_lo, range_hi=excluded.range_hi, enabled=excluded.enabled
-                """, (self.gid, typ, name, lo, hi, enable))
-            await db.commit()
-        await interaction.response.send_message(f"✅ {self.mode.upper()} 완료: {typ} · {name}", ephemeral=True)
-
-class MarketView(discord.ui.View):
-    def __init__(self, gid: int):
-        super().__init__(timeout=300)
-        self.gid = gid
-
-    @discord.ui.button(label="목록 보기", style=discord.ButtonStyle.secondary, row=1)
-    async def list_items(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
-        await ensure_seed_markets_admin(self.gid)
-        async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute(
-                "SELECT type,name,range_lo,range_hi,enabled FROM market_items WHERE guild_id=? ORDER BY type,name",
-                (self.gid,)
+                "SELECT name,range_lo,range_hi,enabled FROM market_items "
+                "WHERE guild_id=? AND type=? AND name=?",
+                (self.gid, self.typ, self.name)
             )
-            rows = await cur.fetchall()
-        if not rows:
-            txt = "등록된 항목이 없습니다."
+            old = await cur.fetchone()
+            if old:
+                # undo: 이전 값 복원
+                sql_ops.append((
+                    "UPDATE market_items SET range_lo=?, range_hi=?, enabled=? "
+                    "WHERE guild_id=? AND type=? AND name=?",
+                    (old[1], old[2], old[3], self.gid, self.typ, self.name)
+                ))
+                await db.execute(
+                    "UPDATE market_items SET range_lo=?, range_hi=?, enabled=? "
+                    "WHERE guild_id=? AND type=? AND name=?",
+                    (self.lo, self.hi, self.en, self.gid, self.typ, self.name)
+                )
+            else:
+                # undo: 삽입 삭제
+                sql_ops.append((
+                    "DELETE FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                    (self.gid, self.typ, self.name)
+                ))
+                await db.execute(
+                    "INSERT INTO market_items(guild_id,type,name,range_lo,range_hi,enabled) VALUES(?,?,?,?,?,?)",
+                    (self.gid, self.typ, self.name, self.lo, self.hi, self.en)
+                )
+            await db.commit()
+
+        em = discord.Embed(title="마켓 저장 완료", color=0x2ecc71)
+        em.add_field(name="종류", value=self.typ)
+        em.add_field(name="이름", value=self.name)
+        em.add_field(name="범위", value=f"{self.lo:+.1f}% ~ {self.hi:+.1f}%")
+        em.add_field(name="EV(추정)", value=f"{ev_of(self.lo,self.hi):+.3f}%")
+        em.add_field(name="상태", value="on" if self.en else "off", inline=True)
+        await interaction.response.edit_message(embed=em, view=UndoView(sql_ops, f"{self.name} 편집"))
+
+class MarketEditModal(discord.ui.Modal, title="마켓 편집/추가"):
+    t_type  = discord.ui.TextInput(label="종류(stock/coin)", placeholder="stock 또는 coin", required=True)
+    t_name  = discord.ui.TextInput(label="이름", placeholder="예: 성현전자", required=True)
+    t_lo    = discord.ui.TextInput(label="최소 변화율(예: -10 / -10.0 / -10%)", required=True)
+    t_hi    = discord.ui.TextInput(label="최대 변화율(예: 10 / 10.0 / 10%)", required=True)
+    t_en    = discord.ui.TextInput(label="활성화(1/0)", default="1", required=True)
+
+    def __init__(self, gid: int, preset: dict | None = None):
+        super().__init__(timeout=180)
+        self.gid = gid
+        if preset:
+            self.t_type.default = preset.get("type","")
+            self.t_name.default = preset.get("name","")
+            self.t_lo.default = str(preset.get("lo",""))
+            self.t_hi.default = str(preset.get("hi",""))
+            self.t_en.default = "1" if preset.get("en",1) else "0"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        typ = str(self.t_type).strip().lower()
+        name = str(self.t_name).strip()
+        try:
+            lo = normalize_percent(str(self.t_lo)); hi = normalize_percent(str(self.t_hi))
+            if lo >= hi: raise ValueError("lo<hi 위반")
+            if abs(lo) > 1000 or abs(hi) > 1000: raise ValueError("범위 초과")
+            en = 1 if str(self.t_en).strip() == "1" else 0
+        except Exception as e:
+            return await interaction.response.send_message(f"입력 검증 실패: {type(e).__name__}: {e}", ephemeral=True)
+
+        em = discord.Embed(title="저장 전 미리보기", color=0x95a5a6)
+        em.add_field(name="종류", value=typ)
+        em.add_field(name="이름", value=name)
+        em.add_field(name="범위", value=f"{lo:+.1f}% ~ {hi:+.1f}%")
+        em.add_field(name="EV(추정)", value=f"{ev_of(lo,hi):+.3f}%")
+        em.set_footer(text="확인을 누르면 저장됩니다.")
+        await interaction.response.send_message(embed=em, ephemeral=True, view=EditConfirmView(self.gid, typ, name, lo, hi, en))
+
+# 검색 입력
+class QueryModal(discord.ui.Modal, title="검색어 입력"):
+    q = discord.ui.TextInput(label="키워드", placeholder="부분 일치, 공백이면 전체", required=False)
+    def __init__(self, view: "MarketViewV2"):
+        super().__init__(timeout=120)
+        self.mv = view
+    async def on_submit(self, interaction: discord.Interaction):
+        self.mv.keyword = str(self.q).strip()
+        self.mv.page = 0
+        await self.mv.refresh(interaction)
+
+# 선택 컴포넌트
+class MarketSelect(discord.ui.Select):
+    def __init__(self, options: list[discord.SelectOption], multi: bool):
+        super().__init__(placeholder="항목을 선택하세요", options=options, min_values=0, max_values=(len(options) if multi else 1), row=0)
+    async def callback(self, interaction: discord.Interaction):
+        view: "MarketViewV2" = self.view  # type: ignore
+        view.selected = list(self.values)
+        await interaction.response.send_message(f"선택: {', '.join(view.selected) if view.selected else '없음'}", ephemeral=True)
+
+# 프리셋 단일 뷰
+class PresetQuickView(discord.ui.View):
+    def __init__(self, mv: "MarketViewV2", names: list[str]):
+        super().__init__(timeout=60)
+        self.mv = mv
+        self.names = names
+
+    async def _apply(self, interaction: discord.Interaction, kind: str):
+        # bulk preset
+        sql_ops: list[tuple[str, tuple]] = []
+        count = 0
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for name in self.names:
+                cur = await db.execute(
+                    "SELECT range_lo,range_hi FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                    (self.mv.gid, self.mv.tab, name)
+                )
+                row = await cur.fetchone()
+                if not row: continue
+                lo2, hi2 = preset_apply(row[0], row[1], kind)
+                sql_ops.append((
+                    "UPDATE market_items SET range_lo=?, range_hi=? WHERE guild_id=? AND type=? AND name=?",
+                    (row[0], row[1], self.mv.gid, self.mv.tab, name)
+                ))
+                await db.execute(
+                    "UPDATE market_items SET range_lo=?, range_hi=? WHERE guild_id=? AND type=? AND name=?",
+                    (lo2, hi2, self.mv.gid, self.mv.tab, name)
+                )
+                count += 1
+            await db.commit()
+        await interaction.response.edit_message(content=f"프리셋 적용({kind}) 완료: {count}개", view=UndoView(sql_ops, f"{self.mv.tab} 프리셋"))
+
+    @discord.ui.button(label="폭 +10%", style=discord.ButtonStyle.secondary, row=0)
+    async def widen(self, i, _): await self._apply(i, "widen10")
+
+    @discord.ui.button(label="폭 -10%", style=discord.ButtonStyle.secondary, row=0)
+    async def narrow(self, i, _): await self._apply(i, "narrow10")
+
+    @discord.ui.button(label="대칭화(중심=0)", style=discord.ButtonStyle.secondary, row=0)
+    async def center(self, i, _): await self._apply(i, "center0")
+
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=1)
+    async def close(self, interaction, _): await interaction.response.edit_message(content="프리셋 취소", view=None)
+
+# MarketView v2
+class MarketViewV2(discord.ui.View):
+    def __init__(self, gid: int):
+        super().__init__(timeout=420)
+        self.gid = gid
+        self.tab = "stock"      # 'stock' | 'coin'
+        self.keyword = ""       # 검색어
+        self.page = 0           # 페이지
+        self.selected: list[str] = []  # 현재 페이지에서 선택된 name
+        self._list_added = False
+
+    # 내부: 리스트 갱신
+    async def refresh(self, interaction: discord.Interaction):
+        total = await count_items(self.gid, self.tab, self.keyword)
+        pages = max(1, math.ceil(total / PAGE_SIZE))
+        if self.page >= pages: self.page = pages - 1
+
+        rows = await list_items(self.gid, self.tab, self.keyword, self.page, PAGE_SIZE)
+        self.selected = []
+
+        # Select 교체
+        options: list[discord.SelectOption] = []
+        for r in rows:
+            label = f"{r['name']}"
+            desc = f"{r['lo']:+.1f}% ~ {r['hi']:+.1f}% ({'on' if r['en'] else 'off'})"
+            options.append(discord.SelectOption(label=label, value=r['name'], description=desc))
+
+        # 기존 Select 제거 후 추가
+        if self._list_added:
+            self.remove_item(self.children[0])  # 항상 row=0 첫 아이템
+        select = MarketSelect(options, multi=True)
+        self.add_item(select)
+        self._list_added = True
+
+        # 상단 임베드
+        em = discord.Embed(title="마켓 항목", color=0x95a5a6)
+        em.description = f"탭: **{('주식' if self.tab=='stock' else '코인')}** · 검색어: **{self.keyword or '없음'}**\n" \
+                         f"페이지: **{self.page+1}/{pages}** · 항목 수: **{total}**"
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=em, view=self)
         else:
-            lines = [f"• [{t}] {n}  {lo:+.1f}% ~ {hi:+.1f}%  ({'on' if en else 'off'})"
-                     for (t,n,lo,hi,en) in rows]
-            txt = "\n".join(lines[:100])
-        em = discord.Embed(title="마켓 항목", description=txt or " ", color=0x95a5a6)
-        await interaction.edit_original_response(embed=em, view=self, content=None)
+            await interaction.response.edit_message(embed=em, view=self)
 
-    @discord.ui.button(label="추가/수정", style=discord.ButtonStyle.success, row=1)
-    async def add_edit(self, interaction, _):
-        await interaction.response.send_modal(MarketModal(self.gid, "add"))
+    # ── 컨트롤(탭/검색/페이지) — row=1 ──
+    @discord.ui.button(label="주식", style=discord.ButtonStyle.primary, row=1)
+    async def tab_stock(self, interaction, _):
+        self.tab = "stock"; self.page = 0
+        await self.refresh(interaction)
 
-    @discord.ui.button(label="삭제", style=discord.ButtonStyle.danger, row=1)
-    async def delete(self, interaction, _):
-        await interaction.response.send_modal(MarketModal(self.gid, "del"))
+    @discord.ui.button(label="코인", style=discord.ButtonStyle.success, row=1)
+    async def tab_coin(self, interaction, _):
+        self.tab = "coin"; self.page = 0
+        await self.refresh(interaction)
 
-    @discord.ui.button(label="활성 토글", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="검색", style=discord.ButtonStyle.secondary, row=1)
+    async def do_search(self, interaction, _):
+        await interaction.response.send_modal(QueryModal(self))
+
+    @discord.ui.button(label="« 이전", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction, _):
+        if self.page > 0: self.page -= 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="다음 »", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction, _):
+        self.page += 1
+        await self.refresh(interaction)
+
+    # ── 단건/일괄 액션 — row=2 ──
+    async def _require_selection(self, interaction: discord.Interaction, single=False) -> list[str] | None:
+        if not self.selected:
+            await interaction.response.send_message("먼저 목록에서 항목을 선택하세요.", ephemeral=True)
+            return None
+        if single and len(self.selected) != 1:
+            await interaction.response.send_message("이 동작은 **하나의 항목만** 선택해야 합니다.", ephemeral=True)
+            return None
+        return self.selected
+
+    @discord.ui.button(label="편집", style=discord.ButtonStyle.primary, row=2)
+    async def edit_item(self, interaction, _):
+        sel = await self._require_selection(interaction, single=True); 
+        if not sel: return
+        # 기존 값 채워 넣어 모달 오픈
+        name = sel[0]
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute("SELECT range_lo,range_hi,enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                   (self.gid, self.tab, name))
+            row = await cur.fetchone()
+        preset = {"type": self.tab, "name": name, "lo": row[0] if row else "", "hi": row[1] if row else "", "en": (row[2] if row else 1)}
+        await interaction.response.send_modal(MarketEditModal(self.gid, preset=preset))
+
+    @discord.ui.button(label="활성 토글(일괄)", style=discord.ButtonStyle.secondary, row=2)
     async def toggle_enable(self, interaction, _):
-        await interaction.response.send_modal(MarketToggleModal(self.gid))
+        sel = await self._require_selection(interaction); 
+        if not sel: return
+        sql_ops: list[tuple[str, tuple]] = []
+        changed = 0
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for name in sel:
+                cur = await db.execute("SELECT enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                       (self.gid, self.tab, name))
+                row = await cur.fetchone()
+                if not row: continue
+                old_en = row[0]; new_en = 0 if old_en else 1
+                sql_ops.append(("UPDATE market_items SET enabled=? WHERE guild_id=? AND type=? AND name=?",
+                                (old_en, self.gid, self.tab, name)))
+                await db.execute("UPDATE market_items SET enabled=? WHERE guild_id=? AND type=? AND name=?",
+                                 (new_en, self.gid, self.tab, name))
+                changed += 1
+            await db.commit()
+        await interaction.response.edit_message(content=f"활성 토글 완료: {changed}개", view=UndoView(sql_ops, "활성 토글"))
 
-    @discord.ui.button(label="← 메인으로", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="삭제(일괄)", style=discord.ButtonStyle.danger, row=2)
+    async def delete_items(self, interaction, _):
+        sel = await self._require_selection(interaction); 
+        if not sel: return
+        sql_ops: list[tuple[str, tuple]] = []
+        deleted = 0
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for name in sel:
+                cur = await db.execute("SELECT name,range_lo,range_hi,enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                       (self.gid, self.tab, name))
+                row = await cur.fetchone()
+                if not row: continue
+                # undo는 재삽입
+                sql_ops.append(("INSERT INTO market_items(guild_id,type,name,range_lo,range_hi,enabled) VALUES(?,?,?,?,?,?)",
+                                (self.gid, self.tab, row[0], row[1], row[2], row[3])))
+                await db.execute("DELETE FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                 (self.gid, self.tab, name))
+                deleted += 1
+            await db.commit()
+        await interaction.response.edit_message(content=f"삭제 완료: {deleted}개", view=UndoView(sql_ops, "삭제"))
+
+    @discord.ui.button(label="복제", style=discord.ButtonStyle.success, row=2)
+    async def duplicate(self, interaction, _):
+        sel = await self._require_selection(interaction, single=True); 
+        if not sel: return
+        name = sel[0]
+        # 새 이름 자동 생성
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute("SELECT range_lo,range_hi,enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                   (self.gid, self.tab, name))
+            row = await cur.fetchone()
+            if not row:
+                return await interaction.response.send_message("원본을 찾을 수 없습니다.", ephemeral=True)
+            base = f"{name} 복사본"
+            new_name = base
+            idx = 2
+            while True:
+                cur = await db.execute("SELECT 1 FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                                       (self.gid, self.tab, new_name))
+                if not await cur.fetchone(): break
+                new_name = f"{base} {idx}"; idx += 1
+
+            await db.execute(
+                "INSERT INTO market_items(guild_id,type,name,range_lo,range_hi,enabled) VALUES(?,?,?,?,?,?)",
+                (self.gid, self.tab, new_name, row[0], row[1], row[2])
+            )
+            await db.commit()
+        # undo: 방금 복제 삭제
+        undo = UndoView([("DELETE FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                          (self.gid, self.tab, new_name))], "복제")
+        await interaction.response.edit_message(content=f"복제 완료 → **{new_name}**", view=undo)
+
+    @discord.ui.button(label="프리셋", style=discord.ButtonStyle.secondary, row=2)
+    async def open_preset(self, interaction, _):
+        sel = await self._require_selection(interaction); 
+        if not sel: return
+        await interaction.response.edit_message(content=f"프리셋 적용 대상: {len(sel)}개", view=PresetQuickView(self, sel))
+
+    # ── 그 외 컨트롤 — row=3 ──
+    @discord.ui.button(label="새 항목 추가", style=discord.ButtonStyle.success, row=3)
+    async def add_new(self, interaction, _):
+        await interaction.response.send_modal(MarketEditModal(self.gid, preset={"type": self.tab}))
+
+    @discord.ui.button(label="새로 고침", style=discord.ButtonStyle.secondary, row=3)
+    async def refresh_btn(self, interaction, _):
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="← 메인으로", style=discord.ButtonStyle.danger, row=3)
     async def back(self, interaction, _):
-        await interaction.response.defer(ephemeral=True)
-        await interaction.edit_original_response(embed=admin_main_embed(), view=AdminMainView(self.gid), content=None)
+        await interaction.response.edit_message(embed=admin_main_embed(), view=AdminMainView(self.gid), content=None)
 
 # ───────── 메인 뷰/임베드 ─────────
 def admin_main_embed() -> discord.Embed:
@@ -496,7 +800,10 @@ class AdminMainView(discord.ui.View):
     async def to_market(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
         await ensure_seed_markets_admin(self.gid)
-        await interaction.edit_original_response(content="마켓 편집", embed=None, view=MarketView(self.gid))
+        mv = MarketViewV2(self.gid)
+        # 최초 렌더
+        await interaction.edit_original_response(content=None, embed=discord.Embed(title="마켓 항목", color=0x95a5a6), view=mv)
+        await mv.refresh(interaction)
 
 # ───────── 슬래시 명령 ─────────
 @app_commands.command(name="mz_admin", description="Open admin menu (owner only)")
