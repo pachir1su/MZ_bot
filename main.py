@@ -49,15 +49,15 @@ class MZTranslator(app_commands.Translator):
                     "mz_money":        "10분마다 1,000 코인 지급",
                     "mz_attend":       "자정(00:00 KST)마다 초기화되는 출석 보상",
                     "mz_rank":         "서버 잔액 순위 TOP 10(닉네임만 표시)",
-                    "mz_bet":          "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩) · 전액 버튼/옵션 지원",
+                    "mz_bet":          "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩) · 전액은 금액=0 또는 all_in 사용",
                     "mz_balance_show": "현재 잔액 확인(대상 선택 가능)",
                     "mz_transfer":     "서버 멤버에게 코인을 송금합니다",
                     "mz_admin":        "관리자 메뉴 열기(메인/서브 분리)",
                     "mz_ask":          "질문을 보내면 랜덤으로 대답합니다",
                     "mz_tarot":        "타로 3장 해석(3초 후 공개, 채널에 표시)",
                     "mz_genie":        "면진지니: Gemini로 짧은 답변 생성",
-                    "mz_stock":        "가상 주식 투자(3초 후 결과 공개, 퍼센트 손익) · 전액 버튼/옵션 지원",
-                    "mz_coin":         "가상 코인 러시(3초 후 공개) · 전액 버튼/옵션 지원",
+                    "mz_stock":        "가상 주식 투자(3초 후 결과 공개, 퍼센트 손익) · 전액은 금액=0 또는 all_in 사용",
+                    "mz_coin":         "가상 코인 러시(3초 후 공개) · 전액은 금액=0 또는 all_in 사용",
                     "mz_bankruptcy":   "잔액이 음수일 때 10분마다 부채 복구 시도",
                 }
                 return desc_map.get(data.name)
@@ -65,12 +65,12 @@ class MZTranslator(app_commands.Translator):
         # 파라미터 설명
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
-                if data.name == "amount":   return "정수 금액(최소 베팅 이상)"
+                if data.name == "amount":   return "정수 금액(0=전액)"
                 if data.name == "symbol":   return "종목(주식)/코인(가상 자산)"
                 if data.name == "question": return "질문 내용"
                 if data.name == "member":   return "받는 사람 선택"
                 if data.name == "user":     return "대상 사용자"
-                if data.name == "all_in":   return "전액 베팅 여부"
+                if data.name == "all_in":   return "전액 베팅 여부(선택)"
         return None
 
 
@@ -80,7 +80,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID", "").strip()
 
 INTENTS = discord.Intents.default()
-INTENTS.members = True            # ✅ 닉네임 표기 안정화
+INTENTS.members = True            # 닉네임/멘션 안정화
 INTENTS.message_content = False
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
@@ -120,7 +120,7 @@ async def setup_hook():
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
 
-    # 길드 우선 싱크(전역 삭제 금지)
+    # 길드 우선 싱크
     gids = [g.strip() for g in DEV_GUILD_ID.split(",") if g.strip()]
     if gids:
         for gid in gids:
