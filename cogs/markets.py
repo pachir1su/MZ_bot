@@ -15,6 +15,10 @@ def footer_text(balance: int | None, mode_name: str) -> str:
         return f"현재 모드 : {mode_name} · 오늘 {t}"
     return f"현재 잔액 : {won(balance)} · 현재 모드 : {mode_name} · 오늘 {t}"
 
+# ── 최소 베팅 ────────────────────────────────────────────
+STOCK_MIN_BET = 5_000
+COIN_MIN_BET  = 20_000
+
 # ── DB 유틸 ─────────────────────────────────────────────
 async def get_mode_name(gid: int) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -87,7 +91,7 @@ def pick_rate(lo: float, hi: float) -> float:
     raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
     return round(raw, 1)
 
-# ── 공용: 주문 접수 임베드 (버튼 제거) ───────────────────
+# ── 안내 임베드 ─────────────────────────────────────────
 async def send_order_embed(interaction: discord.Interaction, title: str, fields: list[tuple[str, str]]):
     em = discord.Embed(title=title, color=0x95a5a6)
     for name, value in fields:
@@ -100,7 +104,6 @@ async def send_order_embed(interaction: discord.Interaction, title: str, fields:
     em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
     await interaction.response.send_message(embed=em)
 
-# ── 잔액 부족 안내 ───────────────────────────────────────
 async def send_insufficient(interaction: discord.Interaction, balance: int, amount: int):
     em = discord.Embed(title="주문 거절 — 잔액 부족", color=0xe74c3c)
     em.add_field(name="현재 잔액", value=won(balance), inline=True)
@@ -112,23 +115,47 @@ async def send_insufficient(interaction: discord.Interaction, balance: int, amou
     else:
         await interaction.response.send_message(embed=em)
 
+async def send_min_bet(interaction: discord.Interaction, min_bet: int, amount: int, balance: int):
+    em = discord.Embed(title="주문 거절 — 최소 베팅 미만", color=0xf39c12)
+    em.add_field(name="최소 베팅", value=won(min_bet), inline=True)
+    em.add_field(name="요청 베팅", value=won(amount), inline=True)
+    em.add_field(name="현재 잔액", value=won(balance), inline=True)
+    em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=em, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=em)
+
+async def send_need_amount(interaction: discord.Interaction):
+    em = discord.Embed(title="베팅 금액이 필요합니다", description="금액을 입력하거나 `all_in` 옵션을 사용해 전액 베팅을 선택하세요.", color=0x95a5a6)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=em, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=em, ephemeral=True)
+
 # ── /면진주식 결과 처리 ─────────────────────────────────
-async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: int):
+async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: int, use_all: bool):
     gid, uid = interaction.guild.id, interaction.user.id
 
-    # 1) 읽기 확인
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
         bal = u["balance"]
-        if amount <= 0 or bal <= 0 or amount > bal:
+
+        # 최소/잔액 검사
+        if amount < STOCK_MIN_BET:
+            await db.execute("ROLLBACK")
+            return await send_min_bet(interaction, STOCK_MIN_BET, amount, bal)
+        if bal <= 0 or amount > bal:
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
-    # 2) 접수
-    await send_order_embed(interaction, "주문 접수 — 주식", [("종목", symbol), ("베팅", won(amount))])
+    # 주문 접수
+    fields = [("종목", symbol), ("베팅", won(amount))]
+    if use_all: fields.append(("옵션", "전액"))
+    await send_order_embed(interaction, "주문 접수 — 주식", fields)
 
-    # 3) 결과
+    # 결과
     await asyncio.sleep(3)
     rng = await get_market_range(gid, "stock", symbol)
     if not rng:
@@ -159,18 +186,25 @@ async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: i
     await interaction.followup.send(embed=em)
 
 # ── /면진코인 결과 처리 ─────────────────────────────────
-async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: int):
+async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: int, use_all: bool):
     gid, uid = interaction.guild.id, interaction.user.id
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
         bal = u["balance"]
-        if amount <= 0 or bal <= 0 or amount > bal:
+
+        # 최소/잔액 검사
+        if amount < COIN_MIN_BET:
+            await db.execute("ROLLBACK")
+            return await send_min_bet(interaction, COIN_MIN_BET, amount, bal)
+        if bal <= 0 or amount > bal:
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
-    await send_order_embed(interaction, "주문 접수 — 코인", [("코인", symbol), ("베팅", won(amount))])
+    fields = [("코인", symbol), ("베팅", won(amount))]
+    if use_all: fields.append(("옵션", "전액"))
+    await send_order_embed(interaction, "주문 접수 — 코인", fields)
 
     await asyncio.sleep(3)
     rng = await get_market_range(gid, "coin", symbol)
@@ -209,14 +243,17 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int = 
     await ensure_seed_markets(gid)
 
     if all_in:
+        # 전액
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
             u = await get_user(db, gid, uid)
             amount = u["balance"]
-            if amount <= 0:
-                await db.execute("ROLLBACK")
-                return await send_insufficient(interaction, u["balance"], 1)
-    await resolve_stock(interaction, symbol.strip(), int(amount))
+    else:
+        # 금액 필수
+        if amount <= 0:
+            return await send_need_amount(interaction)
+
+    await resolve_stock(interaction, symbol.strip(), int(amount), use_all=all_in)
 
 @mz_stock.autocomplete("symbol")
 async def stock_symbol_ac(interaction: discord.Interaction, current: str):
@@ -235,10 +272,11 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int = 0
             await db.execute("BEGIN IMMEDIATE")
             u = await get_user(db, gid, uid)
             amount = u["balance"]
-            if amount <= 0:
-                await db.execute("ROLLBACK")
-                return await send_insufficient(interaction, u["balance"], 1)
-    await resolve_coin(interaction, symbol.strip(), int(amount))
+    else:
+        if amount <= 0:
+            return await send_need_amount(interaction)
+
+    await resolve_coin(interaction, symbol.strip(), int(amount), use_all=all_in)
 
 @mz_coin.autocomplete("symbol")
 async def coin_symbol_ac(interaction: discord.Interaction, current: str):
