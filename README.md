@@ -15,3 +15,6 @@ https://discord.com/oauth2/authorize?client_id=1403372955546812467
 
 ### 업데이트 예정
 - 신 종목 추가?
+- 상점 기능
+- 강화 & 맞짱 기능
+- 칭호 기능
