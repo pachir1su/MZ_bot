@@ -41,7 +41,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# ── 마켓(동적) ───────────────────────────────────────────
+# ── 마켓(동적 시드) ──────────────────────────────────────
 SEED_STOCKS = [
     ("성현전자", -20.0,  20.0),
     ("배달의 승기", -30.0, 30.0),
@@ -85,9 +85,57 @@ async def get_market_range(gid: int, typ: str, name: str) -> tuple[float,float] 
         row = await cur.fetchone()
         return (row[0], row[1]) if row else None
 
-# ── 랜덤 ─────────────────────────────────────────────────
-def pick_rate(lo: float, hi: float) -> float:
-    if hi < lo: lo, hi = hi, lo
+# ── 분포 버킷 (가중치 bps = 만분율) ───────────────────────
+# 주식 — EV≈0%: 작은 변동 자주, 큰 변동 희귀
+BUCKETS = {
+    # STOCKS
+    ("stock","재구식품"): [(7000, -1.5,  1.5), (2700, -3.5,  3.5), (300,  -5.0,  5.0)],
+    ("stock","대이식스"): [(6500, -3.0,  3.0), (3000, -7.0,  7.0), (500, -10.0, 10.0)],
+    ("stock","성현전자"): [(6000, -6.0,  6.0), (3500,-15.0, 15.0), (500, -20.0, 20.0)],
+    ("stock","배달의 승기"): [(5500, -9.0,  9.0), (3800,-22.5, 22.5), (700, -30.0, 30.0)],
+
+    # COINS — 대칭 중심 + 희귀 우상향 테일 (EV 소폭 +)
+    # 건영코인: EV ≈ +1~2%
+    ("coin","건영코인"): [(8200, -20.0,  20.0),
+                          (1600, -40.0,  40.0),
+                          (120,  150.0, 200.0),
+                          (80,  -100.0, -80.0)],
+    # 면진코인: EV ≈ +2.5%
+    ("coin","면진코인"): [(8000, -40.0,  40.0),
+                          (1800, -80.0,  80.0),
+                          (100,  350.0, 500.0),
+                          (100, -200.0,-150.0)],
+    # 승철코인: EV ≈ +3.6%
+    ("coin","승철코인"): [(7500, -60.0,  60.0),
+                          (2300,-120.0, 120.0),
+                          (80,   700.0,1000.0),
+                          (120, -300.0,-240.0)],
+}
+
+def pick_from_buckets(buckets: list[tuple[int, float, float]]) -> float:
+    """가중치(bps) 기반 버킷 선택 후 구간 균등 샘플 → 소수 1자리"""
+    total = sum(max(0, int(w)) for (w, _, _) in buckets)
+    if total <= 0:
+        # 비정상 입력 시 안전 폴백
+        return 0.0
+    r = secrets.randbelow(total)  # 0..total-1
+    acc = 0
+    chosen = buckets[-1]
+    for (w, lo, hi) in buckets:
+        acc += int(w)
+        if r < acc:
+            chosen = (w, lo, hi)
+            break
+    _, lo, hi = chosen
+    if hi < lo:
+        lo, hi = hi, lo
+    # 0..9999 균등 → [lo, hi)
+    raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
+    return round(raw, 1)
+
+def pick_uniform_rate(lo: float, hi: float) -> float:
+    if hi < lo:
+        lo, hi = hi, lo
     raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
     return round(raw, 1)
 
@@ -157,11 +205,16 @@ async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: i
 
     # 결과
     await asyncio.sleep(3)
-    rng = await get_market_range(gid, "stock", symbol)
-    if not rng:
-        return await interaction.followup.send("알 수 없는 종목입니다.", ephemeral=True)
-    lo, hi = rng
-    rate = pick_rate(lo, hi)
+    # 버킷 우선, 없으면 기존 단일구간
+    key = ("stock", symbol)
+    if key in BUCKETS:
+        rate = pick_from_buckets(BUCKETS[key])
+    else:
+        rng = await get_market_range(gid, "stock", symbol)
+        if not rng:
+            return await interaction.followup.send("알 수 없는 종목입니다.", ephemeral=True)
+        rate = pick_uniform_rate(rng[0], rng[1])
+
     delta = int(round(amount * rate / 100.0))
     kind = "stock_win" if delta >= 0 else "stock_lose"
 
@@ -207,11 +260,15 @@ async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: in
     await send_order_embed(interaction, "주문 접수 — 코인", fields)
 
     await asyncio.sleep(3)
-    rng = await get_market_range(gid, "coin", symbol)
-    if not rng:
-        return await interaction.followup.send("알 수 없는 코인입니다.", ephemeral=True)
-    lo, hi = rng
-    rate = pick_rate(lo, hi)
+    key = ("coin", symbol)
+    if key in BUCKETS:
+        rate = pick_from_buckets(BUCKETS[key])
+    else:
+        rng = await get_market_range(gid, "coin", symbol)
+        if not rng:
+            return await interaction.followup.send("알 수 없는 코인입니다.", ephemeral=True)
+        rate = pick_uniform_rate(rng[0], rng[1])
+
     delta = int(round(amount * rate / 100.0))
     kind = "coin_win" if delta >= 0 else "coin_lose"
 
