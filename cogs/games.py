@@ -45,7 +45,7 @@ def footer_text(balance: int | None, mode_name: str) -> str:
     return f"현재 잔액 : {won(balance)} · 현재 모드 : {mode_name} · 오늘 {t}"
 
 # ── 도박 로직 ────────────────────────────────────────────
-async def resolve_bet(interaction: discord.Interaction, amount: int):
+async def resolve_bet(interaction: discord.Interaction, amount: int, use_all: bool = False):
     gid, uid = interaction.guild.id, interaction.user.id
 
     # 1) 파라미터/잔액 확인
@@ -74,13 +74,15 @@ async def resolve_bet(interaction: discord.Interaction, amount: int):
                 return await interaction.followup.send(embed=em, ephemeral=True)
             return await interaction.response.send_message(embed=em)
 
-    # 2) 접수 (버튼 없음)
+    # 2) 접수
     em = discord.Embed(title="주문 접수 — 도박", color=0x95a5a6)
     try:
         em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
     except Exception:
         em.set_author(name=interaction.user.display_name)
     em.add_field(name="베팅", value=won(amount))
+    if use_all:
+        em.add_field(name="옵션", value="전액", inline=True)
     em.add_field(name="\u200b", value="**3초 후 결과가 공개됩니다.**", inline=False)
     async with aiosqlite.connect(DB_PATH) as db:
         s = await get_settings(db, gid)
@@ -118,17 +120,13 @@ async def resolve_bet(interaction: discord.Interaction, amount: int):
 @app_commands.describe(amount="베팅 금액(정수)", all_in="전액 베팅 여부")
 async def mz_bet(interaction: discord.Interaction, amount: int = 0, all_in: bool = False):
     gid, uid = interaction.guild.id, interaction.user.id
-    if all_in:
+    use_all = all_in or (amount <= 0)
+    if use_all:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
             u = await get_user(db, gid, uid)
             amount = u["balance"]
-            if amount <= 0:
-                await db.execute("ROLLBACK")
-                em = discord.Embed(title="주문 거절 — 잔액 부족", color=0xe74c3c)
-                em.add_field(name="현재 잔액", value=won(u["balance"]))
-                return await interaction.response.send_message(embed=em, ephemeral=True)
-    await resolve_bet(interaction, int(amount))
+    await resolve_bet(interaction, int(amount), use_all=use_all)
 
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_bet)
