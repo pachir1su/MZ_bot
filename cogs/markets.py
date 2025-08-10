@@ -1,12 +1,13 @@
-import aiosqlite, secrets, json, time, asyncio
+import aiosqlite, secrets, json, time, asyncio, math, random
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
 DB_PATH = "economy.db"
 
-# 공개까지 기다리는 시간(초) — 주식/코인 공통
-REVEAL_DELAY = 3
+# 공개/애니메이션 설정
+REVEAL_DELAY = 3        # 전체 대기 시간(초)
+PROGRESS_TICKS = 6      # 프레임 수(예: 3초/6틱 → 0.5초 간격)
 
 # ── 표시/시간 유틸 ───────────────────────────────────────
 KST = timezone(timedelta(hours=9))
@@ -40,7 +41,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# ── 상품 정의 ────────────────────────────────────────────
+# ── 기본 범위(현재는 정적 — 필요 시 자동완성/DB로 대체 가능) ─────────
 STOCKS = {
     "성현전자":   (-20.0, +20.0),
     "배달의 승기": (-30.0, +30.0),
@@ -53,22 +54,61 @@ COINS = {
     "승철코인": (-200.0, +400.0),
 }
 
-# 선택지(정적) — 필요 시 자동완성으로 교체 가능
 STOCK_CHOICES = [app_commands.Choice(name=n, value=n) for n in STOCKS.keys()]
 COIN_CHOICES  = [app_commands.Choice(name=n, value=n) for n in COINS.keys()]
 
 def pick_rate(lo: float, hi: float) -> float:
-    """한 자리 소수 고정. 극단값은 희귀하게만 나오도록 균등 추출."""
+    """한 자리 소수 고정. 균등 추출(극단값은 자연히 희귀)."""
     if hi < lo: lo, hi = hi, lo
     raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
     return round(raw, 1)
+
+# ── 애니메이션 유틸 ──────────────────────────────────────
+def progress_bar(p: float, width: int = 12) -> str:
+    p = max(0.0, min(1.0, p))
+    filled = int(round(p * width))
+    return "▰" * filled + "▱" * (width - filled)
+
+def ease_out_cubic(t: float) -> float:
+    return max(0.0, min(1.0, 1 - (1 - t) ** 3))
+
+def make_previews(lo: float, hi: float, final_value: float, ticks: int) -> list[float]:
+    seq = []
+    start = random.uniform(lo, hi)
+    for i in range(1, ticks + 1):
+        t = ease_out_cubic(i / ticks)
+        val = start * (1 - t) + final_value * t
+        jitter = (hi - lo) * 0.02 * (1 - t)
+        if jitter:
+            val += random.uniform(-jitter, jitter)
+        seq.append(round(val, 1))
+    seq[-1] = round(final_value, 1)
+    return seq
+
+async def animate_preview_embed(interaction: discord.Interaction, title: str,
+                                header_fields: list[tuple[str, str]],
+                                preview_label: str, previews: list[float]):
+    for i, v in enumerate(previews, start=1):
+        p = i / len(previews)
+        em = discord.Embed(title=title, color=0xF1C40F)  # 진행 중
+        try:
+            em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        except Exception:
+            em.set_author(name=interaction.user.display_name)
+        for name, value in header_fields:
+            em.add_field(name=name, value=value, inline=True)
+        em.add_field(name=preview_label, value=f"{v:+.1f}%", inline=True)
+        em.add_field(name="\u200b", value=f"{progress_bar(p)}  **{int(p*100)}%**", inline=False)
+        em.set_footer(text=f"오늘 {now_kst().strftime('%H:%M')}")
+        await interaction.edit_original_response(embed=em)
+        await asyncio.sleep(REVEAL_DELAY / max(1, len(previews)))
 
 # ── 공용: 주문 접수 임베드(초기 메시지) ───────────────────
 async def send_order_embed(interaction: discord.Interaction, title: str, fields: list[tuple[str, str]]):
     em = discord.Embed(title=title, color=0x95a5a6)
     for name, value in fields:
         em.add_field(name=name, value=value)
-    em.add_field(name="\u200b", value=f"**{REVEAL_DELAY}초 후 결과가 공개됩니다.**", inline=False)
+    em.add_field(name="\u200b", value=f"결과 계산 중… {REVEAL_DELAY}초", inline=False)
     try:
         em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
     except Exception:
@@ -86,7 +126,7 @@ async def send_insufficient(interaction: discord.Interaction, balance: int, amou
     await interaction.response.send_message(embed=em)
 
 # ── /면진주식 ────────────────────────────────────────────
-@app_commands.command(name="mz_stock", description="가상 주식 투자(결과는 같은 메시지로 공개)")
+@app_commands.command(name="mz_stock", description="가상 주식 투자(애니메이션 공개)")
 @app_commands.describe(symbol="종목(성현전자/배달의 승기/대이식스/재구식품)", amount="베팅 금액(정수)")
 @app_commands.choices(symbol=STOCK_CHOICES)
 async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
@@ -106,30 +146,39 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
-    # 주문 접수(초기 메시지 전송)
+    # 주문 접수(초기 메시지)
     await send_order_embed(
         interaction,
         "주문 접수 — 주식",
         [("종목", symbol), ("베팅", won(amount))]
     )
 
-    # 결과 계산까지 대기
-    await asyncio.sleep(REVEAL_DELAY)
+    # 결과 미리 산출(아직 DB 반영 X)
     lo, hi = STOCKS[symbol]
-    rate = pick_rate(lo, hi)                   # % (소수1자리)
-    delta = int(round(amount * rate / 100.0))  # 손익
-    kind = "stock_win" if delta >= 0 else "stock_lose"
+    rate = pick_rate(lo, hi)
+    delta = int(round(amount * rate / 100.0))
+    previews = make_previews(lo, hi, rate, PROGRESS_TICKS)
 
-    # 반영
+    # 애니메이션
+    await animate_preview_embed(
+        interaction,
+        title="주문 접수 — 주식",
+        header_fields=[("종목", symbol), ("베팅", won(amount))],
+        preview_label="변화율(예상)",
+        previews=previews,
+    )
+
+    # DB 반영
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
-        new_bal = u["balance"] + delta         # 손익만 반영(원금 차감 없음)
+        new_bal = u["balance"] + delta
         await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
-        await write_ledger(db, gid, uid, kind, delta, new_bal, {"symbol": symbol, "amount": amount, "rate_pct": rate})
+        await write_ledger(db, gid, uid, "stock_win" if delta >= 0 else "stock_lose",
+                           delta, new_bal, {"symbol": symbol, "amount": amount, "rate_pct": rate})
         await db.commit()
 
-    # 결과 임베드(같은 메시지 수정)
+    # 최종 결과
     color = 0x2ecc71 if delta >= 0 else 0xe74c3c
     em = discord.Embed(title=f"주식 결과 — {symbol}", color=color)
     try:
@@ -140,14 +189,13 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     em.add_field(name="손익",   value=f"{'+' if delta>=0 else ''}{won(delta)}", inline=True)
     em.add_field(name="현재 잔액", value=won(new_bal), inline=False)
     em.set_footer(text=footer_text(new_bal, await get_mode_name(gid)))
-
     try:
         await interaction.edit_original_response(embed=em)
     except discord.NotFound:
         await interaction.followup.send(embed=em)
 
 # ── /면진코인 ────────────────────────────────────────────
-@app_commands.command(name="mz_coin", description="가상 코인 러시(결과는 같은 메시지로 공개)")
+@app_commands.command(name="mz_coin", description="가상 코인 러시(애니메이션 공개)")
 @app_commands.describe(symbol="코인(건영코인/면진코인/승철코인)", amount="베팅 금액(정수)")
 @app_commands.choices(symbol=COIN_CHOICES)
 async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
@@ -167,28 +215,39 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
-    # 주문 접수(초기 메시지 전송)
+    # 주문 접수(초기 메시지)
     await send_order_embed(
         interaction,
         "주문 접수 — 코인",
         [("코인", symbol), ("베팅", won(amount))]
     )
 
-    # 결과 계산까지 대기
-    await asyncio.sleep(REVEAL_DELAY)
+    # 결과 미리 산출(아직 DB 반영 X)
     lo, hi = COINS[symbol]
-    rate = pick_rate(lo, hi)                   # % (소수1자리)
+    rate = pick_rate(lo, hi)
     delta = int(round(amount * rate / 100.0))
-    kind = "coin_win" if delta >= 0 else "coin_lose"
+    previews = make_previews(lo, hi, rate, PROGRESS_TICKS)
 
+    # 애니메이션
+    await animate_preview_embed(
+        interaction,
+        title="주문 접수 — 코인",
+        header_fields=[("코인", symbol), ("베팅", won(amount))],
+        preview_label="수익률(예상)",
+        previews=previews,
+    )
+
+    # DB 반영
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
-        new_bal = u["balance"] + delta         # 손익만 반영
+        new_bal = u["balance"] + delta
         await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
-        await write_ledger(db, gid, uid, kind, delta, new_bal, {"coin": symbol, "amount": amount, "rate_pct": rate})
+        await write_ledger(db, gid, uid, "coin_win" if delta >= 0 else "coin_lose",
+                           delta, new_bal, {"coin": symbol, "amount": amount, "rate_pct": rate})
         await db.commit()
 
+    # 최종 결과
     color = 0x2ecc71 if delta >= 0 else 0xe74c3c
     em = discord.Embed(title=f"코인 결과 — {symbol}", color=color)
     try:
@@ -199,7 +258,6 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
     em.add_field(name="손익",       value=f"{'+' if delta>=0 else ''}{won(delta)}", inline=True)
     em.add_field(name="현재 잔액",   value=won(new_bal), inline=False)
     em.set_footer(text=footer_text(new_bal, await get_mode_name(gid)))
-
     try:
         await interaction.edit_original_response(embed=em)
     except discord.NotFound:
