@@ -1,13 +1,18 @@
-import aiosqlite, secrets, json, time, asyncio, math, random
+# cogs/markets.py
+import aiosqlite, secrets, json, time, asyncio, random
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
 DB_PATH = "economy.db"
 
-# 공개/애니메이션 설정
-REVEAL_DELAY = 3        # 전체 대기 시간(초)
-PROGRESS_TICKS = 6      # 프레임 수(예: 3초/6틱 → 0.5초 간격)
+# ── 공개/애니메이션 설정 ───────────────────────────────
+REVEAL_DELAY = 3        # 결과 공개까지 총 지연(초)
+PROGRESS_TICKS = 6      # 애니메이션 프레임 수(3초/6틱 → 0.5초 간격)
+
+# ✅ 최소 베팅(정책)
+MIN_STOCK_BET = 5_000
+MIN_COIN_BET  = 20_000
 
 # ── 표시/시간 유틸 ───────────────────────────────────────
 KST = timezone(timedelta(hours=9))
@@ -41,7 +46,7 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# ── 기본 범위(현재는 정적 — 필요 시 자동완성/DB로 대체 가능) ─────────
+# ── 기본 범위(표기/자동완성용) ────────────────────────────
 STOCKS = {
     "성현전자":   (-20.0, +20.0),
     "배달의 승기": (-30.0, +30.0),
@@ -58,7 +63,7 @@ STOCK_CHOICES = [app_commands.Choice(name=n, value=n) for n in STOCKS.keys()]
 COIN_CHOICES  = [app_commands.Choice(name=n, value=n) for n in COINS.keys()]
 
 def pick_rate(lo: float, hi: float) -> float:
-    """한 자리 소수 고정. 균등 추출(극단값은 자연히 희귀)."""
+    """한 자리 소수 고정. 균등 추출(극단은 자연히 희귀)."""
     if hi < lo: lo, hi = hi, lo
     raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
     return round(raw, 1)
@@ -90,7 +95,7 @@ async def animate_preview_embed(interaction: discord.Interaction, title: str,
                                 preview_label: str, previews: list[float]):
     for i, v in enumerate(previews, start=1):
         p = i / len(previews)
-        em = discord.Embed(title=title, color=0xF1C40F)  # 진행 중
+        em = discord.Embed(title=title, color=0xF1C40F)  # 진행 중 노란색
         try:
             em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         except Exception:
@@ -116,7 +121,7 @@ async def send_order_embed(interaction: discord.Interaction, title: str, fields:
     em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
     await interaction.response.send_message(embed=em)
 
-# ── 잔액 부족 안내(공개) ─────────────────────────────────
+# ── 잔액/최소베팅 안내 ───────────────────────────────────
 async def send_insufficient(interaction: discord.Interaction, balance: int, amount: int):
     em = discord.Embed(title="주문 거절 — 잔액 부족", color=0xe74c3c)
     em.add_field(name="현재 잔액", value=won(balance), inline=True)
@@ -125,33 +130,52 @@ async def send_insufficient(interaction: discord.Interaction, balance: int, amou
     em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
     await interaction.response.send_message(embed=em)
 
+async def send_min_bet_violation(interaction: discord.Interaction, kind: str, min_bet: int, amount: int):
+    em = discord.Embed(title=f"주문 거절 — 최소 {kind} 베팅 미만", color=0xf1c40f)
+    em.add_field(name="최소 베팅", value=won(min_bet), inline=True)
+    em.add_field(name="요청 베팅", value=won(amount), inline=True)
+    em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
+    await interaction.response.send_message(embed=em)
+
 # ── /면진주식 ────────────────────────────────────────────
-@app_commands.command(name="mz_stock", description="가상 주식 투자(애니메이션 공개)")
-@app_commands.describe(symbol="종목(성현전자/배달의 승기/대이식스/재구식품)", amount="베팅 금액(정수)")
+@app_commands.command(name="mz_stock", description="가상 주식 투자(0=전액, 애니메이션 공개)")
+@app_commands.describe(
+    symbol="종목(성현전자/배달의 승기/대이식스/재구식품)",
+    amount=f"베팅 금액(정수, 0=전액, 최소 {MIN_STOCK_BET:,}₩)"
+)
 @app_commands.choices(symbol=STOCK_CHOICES)
 async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
     symbol = symbol.strip()
     if symbol not in STOCKS:
         return await interaction.response.send_message("알 수 없는 종목입니다.", ephemeral=False)
-    if amount <= 0:
-        return await interaction.response.send_message("베팅 금액은 1 이상이어야 합니다.", ephemeral=False)
+    if amount < 0:   # 0은 전액 허용
+        return await interaction.response.send_message("베팅 금액은 음수가 될 수 없습니다.", ephemeral=False)
 
-    # 동시성 안전: 잔액 확인
+    # 동시성 안전: 잔액 확인 및 전액 처리
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
         bal = u["balance"]
-        if bal <= 0 or amount > bal:
+
+        all_in = False
+        if amount == 0:
+            amount = bal
+            all_in = True
+
+        if bal <= 0 or amount <= 0 or amount > bal:
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
+        if amount < MIN_STOCK_BET:
+            await db.execute("ROLLBACK")
+            return await send_min_bet_violation(interaction, "주식", MIN_STOCK_BET, amount)
+
     # 주문 접수(초기 메시지)
-    await send_order_embed(
-        interaction,
-        "주문 접수 — 주식",
-        [("종목", symbol), ("베팅", won(amount))]
-    )
+    fields = [("종목", symbol), ("베팅", won(amount))]
+    if all_in:
+        fields.append(("옵션", "전액"))
+    await send_order_embed(interaction, "주문 접수 — 주식", fields)
 
     # 결과 미리 산출(아직 DB 반영 X)
     lo, hi = STOCKS[symbol]
@@ -164,7 +188,7 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
         interaction,
         title="주문 접수 — 주식",
         header_fields=[("종목", symbol), ("베팅", won(amount))],
-        preview_label="변화율(예상)",
+        preview_label="변화율(미리보기)",
         previews=previews,
     )
 
@@ -195,32 +219,44 @@ async def mz_stock(interaction: discord.Interaction, symbol: str, amount: int):
         await interaction.followup.send(embed=em)
 
 # ── /면진코인 ────────────────────────────────────────────
-@app_commands.command(name="mz_coin", description="가상 코인 러시(애니메이션 공개)")
-@app_commands.describe(symbol="코인(건영코인/면진코인/승철코인)", amount="베팅 금액(정수)")
+@app_commands.command(name="mz_coin", description="가상 코인 러시(0=전액, 애니메이션 공개)")
+@app_commands.describe(
+    symbol="코인(건영코인/면진코인/승철코인)",
+    amount=f"베팅 금액(정수, 0=전액, 최소 {MIN_COIN_BET:,}₩)"
+)
 @app_commands.choices(symbol=COIN_CHOICES)
 async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
     symbol = symbol.strip()
     if symbol not in COINS:
         return await interaction.response.send_message("알 수 없는 코인입니다.", ephemeral=False)
-    if amount <= 0:
-        return await interaction.response.send_message("베팅 금액은 1 이상이어야 합니다.", ephemeral=False)
+    if amount < 0:
+        return await interaction.response.send_message("베팅 금액은 음수가 될 수 없습니다.", ephemeral=False)
 
-    # 동시성 안전: 잔액 확인
+    # 동시성 안전: 잔액 확인 및 전액 처리
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
         bal = u["balance"]
-        if bal <= 0 or amount > bal:
+
+        all_in = False
+        if amount == 0:
+            amount = bal
+            all_in = True
+
+        if bal <= 0 or amount <= 0 or amount > bal:
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
+        if amount < MIN_COIN_BET:
+            await db.execute("ROLLBACK")
+            return await send_min_bet_violation(interaction, "코인", MIN_COIN_BET, amount)
+
     # 주문 접수(초기 메시지)
-    await send_order_embed(
-        interaction,
-        "주문 접수 — 코인",
-        [("코인", symbol), ("베팅", won(amount))]
-    )
+    fields = [("코인", symbol), ("베팅", won(amount))]
+    if all_in:
+        fields.append(("옵션", "전액"))
+    await send_order_embed(interaction, "주문 접수 — 코인", fields)
 
     # 결과 미리 산출(아직 DB 반영 X)
     lo, hi = COINS[symbol]
@@ -233,7 +269,7 @@ async def mz_coin(interaction: discord.Interaction, symbol: str, amount: int):
         interaction,
         title="주문 접수 — 코인",
         header_fields=[("코인", symbol), ("베팅", won(amount))],
-        preview_label="수익률(예상)",
+        preview_label="수익률(미리보기)",
         previews=previews,
     )
 
