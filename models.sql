@@ -42,3 +42,12 @@ CREATE TABLE IF NOT EXISTS market_items (
   enabled   INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (guild_id, type, name)
 );
+
+-- [NEW] 무기/강화 상태 저장
+CREATE TABLE IF NOT EXISTS user_weapons (
+  guild_id   INTEGER NOT NULL,
+  user_id    INTEGER NOT NULL,
+  level      INTEGER NOT NULL DEFAULT 0,  -- +0 ~ +10
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (guild_id, user_id)
+);
