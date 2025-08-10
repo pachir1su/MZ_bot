@@ -14,4 +14,4 @@ https://discord.com/oauth2/authorize?client_id=1403372955546812467
 ---
 
 ### 업데이트 예정
-- 도박 / 주식 / 코인 3초 대기 중 애니메이션 출력
+- 신 종목 추가?
