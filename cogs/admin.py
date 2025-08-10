@@ -32,7 +32,7 @@ async def set_setting_field(db, gid: int, key: str, value: str):
     elif key in ("min_bet", "win_min_bps", "win_max_bps"):
         raw = value.strip().replace("%", "")
         if key.startswith("win_"):
-            num = int(round(float(raw) * 100))
+            num = int(round(float(raw) * 100))  # 66.5% -> 6650 bps
         else:
             num = int(raw)
         await db.execute(f"UPDATE guild_settings SET {key}=? WHERE guild_id=?", (num, gid))
@@ -73,7 +73,7 @@ async def apply_balance_change(gid: int, uid: int, op: str, amount: int, actor: 
     return old_bal, new_bal, delta
 
 def settings_embed(s: dict) -> discord.Embed:
-    em = discord.Embed(title="서버 설정", color=0x3498db)
+    em = discord.Embed(title="도박 메뉴 — 현재 설정", color=0x3498db)
     em.add_field(name="최소 베팅", value=f"{s['min_bet']:,}₩")
     em.add_field(name="승률 하한", value=f"{s['win_min_bps']/100:.2f}%")
     em.add_field(name="승률 상한", value=f"{s['win_max_bps']/100:.2f}%")
@@ -114,7 +114,7 @@ def admin_help_embed() -> discord.Embed:
         "• **전파 지연**: **전역(Global)** 명령은 반영까지 시간이 걸릴 수 있습니다(보통 최대 1시간). "
         "**길드(Guild)** 명령은 즉시 반영됩니다.\n"
         "• **개발 시 권장**: `.env`에 `DEV_GUILD_ID`를 설정하고, 봇이 **길드 싱크**를 수행하도록 하세요.\n"
-        "• **권한 확인**: 서버/채널 권한에서 **애플리케이션 명령어 사용(Use Application Commands)** 이 허용되어 있는지 확인하세요."
+        "• **권한 확인**: 서버/채널 권한에서 **애플리케이션 명령어 사용**이 허용되어 있는지 확인하세요."
     )
     return em
 
@@ -216,7 +216,7 @@ class TargetUserSelect(discord.ui.UserSelect):
                   else "서버 전체")
         await interaction.response.send_message(f"대상 선택: **{picked}**", ephemeral=True)
 
-# ───────── 서브 뷰: 설정 ─────────
+# ───────── 서브 뷰: 도박 설정 ─────────
 class SettingsView(discord.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=300)
@@ -315,7 +315,7 @@ class CooldownView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await interaction.edit_original_response(embed=admin_main_embed(), view=AdminMainView(self.gid), content=None)
 
-# ───────── 서브 뷰: 도구 ─────────
+# ───────── 서브 뷰: 도구 (누락되었던 부분 추가) ─────────
 class ToolsView(discord.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=300)
@@ -337,14 +337,46 @@ class ToolsView(discord.ui.View):
     @discord.ui.button(label="← 메인으로", style=discord.ButtonStyle.danger, row=4)
     async def back(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
-        await interaction.edit_original_response(embed=admin_main_embed(), view=AdminMainView(self.gid), content=None)
+        await interaction.edit_original_response(
+            embed=admin_main_embed(), view=AdminMainView(self.gid), content=None
+        )
+
+# ───────── 마켓 토글 모달 ─────────
+class MarketToggleModal(discord.ui.Modal, title="마켓 활성/비활성 토글"):
+    t_type = discord.ui.TextInput(label="종류(stock/coin)")
+    t_name = discord.ui.TextInput(label="이름(정확히)")
+
+    def __init__(self, gid: int):
+        super().__init__(timeout=120)
+        self.gid = gid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        typ = str(self.t_type).strip().lower()
+        name = str(self.t_name).strip()
+        if typ not in ("stock","coin"):
+            return await interaction.response.send_message("type은 stock/coin만 허용됩니다.", ephemeral=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT enabled FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                (self.gid, typ, name)
+            )
+            row = await cur.fetchone()
+            if not row:
+                return await interaction.response.send_message("해당 항목이 없습니다.", ephemeral=True)
+            new_en = 0 if row[0] else 1
+            await db.execute(
+                "UPDATE market_items SET enabled=? WHERE guild_id=? AND type=? AND name=?",
+                (new_en, self.gid, typ, name)
+            )
+            await db.commit()
+        await interaction.response.send_message(f"✅ {name} → {'on' if new_en else 'off'}", ephemeral=True)
 
 # ───────── 서브 뷰: 마켓(주식/코인) 편집 ─────────
 class MarketModal(discord.ui.Modal, title="마켓 항목"):
     t_type  = discord.ui.TextInput(label="종류(stock/coin)")
     t_name  = discord.ui.TextInput(label="이름(예: 성현전자)")
-    t_lo    = discord.ui.TextInput(label="최소 변화율(예: -20.0)")
-    t_hi    = discord.ui.TextInput(label="최대 변화율(예: 20.0)")
+    t_lo    = discord.ui.TextInput(label="최소 변화율(예: -20.0)", required=False)
+    t_hi    = discord.ui.TextInput(label="최대 변화율(예: 20.0)", required=False)
     t_enable= discord.ui.TextInput(label="활성화(1/0)", default="1")
 
     def __init__(self, gid: int, mode: str):
@@ -364,8 +396,16 @@ class MarketModal(discord.ui.Modal, title="마켓 항목"):
                 await db.execute("DELETE FROM market_items WHERE guild_id=? AND type=? AND name=?",
                                  (self.gid, typ, name))
             else:
-                lo = float(str(self.t_lo))
-                hi = float(str(self.t_hi))
+                # 공란은 기존 값 유지
+                cur = await db.execute(
+                    "SELECT range_lo, range_hi FROM market_items WHERE guild_id=? AND type=? AND name=?",
+                    (self.gid, typ, name)
+                )
+                old = await cur.fetchone()
+                lo_txt = str(self.t_lo).strip()
+                hi_txt = str(self.t_hi).strip()
+                lo = float(lo_txt) if lo_txt else (old[0] if old else 0.0)
+                hi = float(hi_txt) if hi_txt else (old[1] if old else 0.0)
                 enable = 1 if str(self.t_enable).strip() == "1" else 0
                 await db.execute("""
                     INSERT INTO market_items(guild_id,type,name,range_lo,range_hi,enabled)
@@ -396,7 +436,7 @@ class MarketView(discord.ui.View):
         else:
             lines = [f"• [{t}] {n}  {lo:+.1f}% ~ {hi:+.1f}%  ({'on' if en else 'off'})"
                      for (t,n,lo,hi,en) in rows]
-            txt = "\n".join(lines[:50])
+            txt = "\n".join(lines[:100])
         em = discord.Embed(title="마켓 항목", description=txt or " ", color=0x95a5a6)
         await interaction.edit_original_response(embed=em, view=self, content=None)
 
@@ -407,6 +447,10 @@ class MarketView(discord.ui.View):
     @discord.ui.button(label="삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete(self, interaction, _):
         await interaction.response.send_modal(MarketModal(self.gid, "del"))
+
+    @discord.ui.button(label="활성 토글", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_enable(self, interaction, _):
+        await interaction.response.send_modal(MarketToggleModal(self.gid))
 
     @discord.ui.button(label="← 메인으로", style=discord.ButtonStyle.danger, row=4)
     async def back(self, interaction, _):
@@ -424,7 +468,7 @@ class AdminMainView(discord.ui.View):
         super().__init__(timeout=300)
         self.gid = gid
 
-    @discord.ui.button(label="설정", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="도박 메뉴", style=discord.ButtonStyle.primary, row=0)
     async def to_settings(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
         async with aiosqlite.connect(DB_PATH) as db:
