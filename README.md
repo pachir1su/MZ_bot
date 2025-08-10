@@ -1,6 +1,6 @@
 # MZ_bot
 
-Discord 기반 경제/도박 봇입니다.
+Discord 도박 봇
 
 ## 요구 사항
 - Python 3.10 이상
