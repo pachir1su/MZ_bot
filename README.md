@@ -35,5 +35,4 @@ https://discord.com/oauth2/authorize?client_id=1403372955546812467
 ---
 
 ### Memo
-- 주식 / 코인 밸런스 조정
 - 관리자 메뉴 마켓 수정 사용성 개선
