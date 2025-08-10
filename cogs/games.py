@@ -44,26 +44,8 @@ def footer_text(balance: int | None, mode_name: str) -> str:
         return f"현재 모드 : {mode_name} · 오늘 {t}"
     return f"현재 잔액 : {won(balance)} · 현재 모드 : {mode_name} · 오늘 {t}"
 
-# ── 전액 버튼 ────────────────────────────────────────────
-class AllInBetView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=30)
-
-    @discord.ui.button(label="전액", style=discord.ButtonStyle.primary)
-    async def all_in(self, interaction: discord.Interaction, _: discord.ui.Button):
-        gid, uid = interaction.guild.id, interaction.user.id
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            u = await get_user(db, gid, uid)
-            bal = u["balance"]
-            if bal <= 0:
-                await db.execute("ROLLBACK")
-                return await interaction.response.send_message("잔액이 없습니다.", ephemeral=True)
-        await interaction.response.defer()
-        await resolve_bet(interaction, bal, invoked_by_button=True)
-
 # ── 도박 로직 ────────────────────────────────────────────
-async def resolve_bet(interaction: discord.Interaction, amount: int, invoked_by_button: bool = False):
+async def resolve_bet(interaction: discord.Interaction, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
 
     # 1) 파라미터/잔액 확인
@@ -92,19 +74,18 @@ async def resolve_bet(interaction: discord.Interaction, amount: int, invoked_by_
                 return await interaction.followup.send(embed=em, ephemeral=True)
             return await interaction.response.send_message(embed=em)
 
-    # 2) 접수
-    if not invoked_by_button:
-        em = discord.Embed(title="주문 접수 — 도박", color=0x95a5a6)
-        try:
-            em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        except Exception:
-            em.set_author(name=interaction.user.display_name)
-        em.add_field(name="베팅", value=won(amount))
-        em.add_field(name="\u200b", value="**3초 후 결과가 공개됩니다.**", inline=False)
-        async with aiosqlite.connect(DB_PATH) as db:
-            s = await get_settings(db, gid)
-        em.set_footer(text=footer_text(None, s["mode_name"]))
-        await interaction.response.send_message(embed=em, view=AllInBetView())
+    # 2) 접수 (버튼 없음)
+    em = discord.Embed(title="주문 접수 — 도박", color=0x95a5a6)
+    try:
+        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception:
+        em.set_author(name=interaction.user.display_name)
+    em.add_field(name="베팅", value=won(amount))
+    em.add_field(name="\u200b", value="**3초 후 결과가 공개됩니다.**", inline=False)
+    async with aiosqlite.connect(DB_PATH) as db:
+        s = await get_settings(db, gid)
+    em.set_footer(text=footer_text(None, s["mode_name"]))
+    await interaction.response.send_message(embed=em)
 
     # 3) 결과
     await asyncio.sleep(3)
