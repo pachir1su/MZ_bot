@@ -87,8 +87,8 @@ def pick_rate(lo: float, hi: float) -> float:
     raw = lo + (hi - lo) * (secrets.randbelow(10_000) / 10_000.0)
     return round(raw, 1)
 
-# ── 공용: 주문 접수 임베드 ───────────────────────────────
-async def send_order_embed(interaction: discord.Interaction, title: str, fields: list[tuple[str, str]], view: discord.ui.View | None = None):
+# ── 공용: 주문 접수 임베드 (버튼 제거) ───────────────────
+async def send_order_embed(interaction: discord.Interaction, title: str, fields: list[tuple[str, str]]):
     em = discord.Embed(title=title, color=0x95a5a6)
     for name, value in fields:
         em.add_field(name=name, value=value)
@@ -98,9 +98,9 @@ async def send_order_embed(interaction: discord.Interaction, title: str, fields:
     except Exception:
         em.set_author(name=interaction.user.display_name)
     em.set_footer(text=f"현재 모드 : {await get_mode_name(interaction.guild.id)} · 오늘 {now_kst().strftime('%H:%M')}")
-    await interaction.response.send_message(embed=em, view=view)
+    await interaction.response.send_message(embed=em)
 
-# ── 잔액 부족 안내(공개/후속 모두 대응) ───────────────────
+# ── 잔액 부족 안내 ───────────────────────────────────────
 async def send_insufficient(interaction: discord.Interaction, balance: int, amount: int):
     em = discord.Embed(title="주문 거절 — 잔액 부족", color=0xe74c3c)
     em.add_field(name="현재 잔액", value=won(balance), inline=True)
@@ -112,33 +112,8 @@ async def send_insufficient(interaction: discord.Interaction, balance: int, amou
     else:
         await interaction.response.send_message(embed=em)
 
-# ── 전액 버튼 ────────────────────────────────────────────
-class AllInView(discord.ui.View):
-    def __init__(self, kind: str, symbol: str):
-        super().__init__(timeout=30)
-        self.kind = kind    # 'stock'|'coin'
-        self.symbol = symbol
-
-    @discord.ui.button(label="전액", style=discord.ButtonStyle.primary)
-    async def all_in(self, interaction: discord.Interaction, _: discord.ui.Button):
-        gid, uid = interaction.guild.id, interaction.user.id
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            u = await get_user(db, gid, uid)
-            bal = u["balance"]
-            if bal <= 0:
-                await db.execute("ROLLBACK")
-                return await interaction.response.send_message("잔액이 없습니다.", ephemeral=True)
-        await interaction.response.defer()
-        if self.kind == "stock":
-            await resolve_stock(interaction, self.symbol, bal, invoked_by_button=True)
-        else:
-            await resolve_coin(interaction, self.symbol, bal, invoked_by_button=True)
-        for c in self.children:
-            c.disabled = True
-
 # ── /면진주식 결과 처리 ─────────────────────────────────
-async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: int, invoked_by_button: bool = False):
+async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
 
     # 1) 읽기 확인
@@ -151,9 +126,7 @@ async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: i
             return await send_insufficient(interaction, bal, amount)
 
     # 2) 접수
-    view = None if invoked_by_button else AllInView("stock", symbol)
-    if not invoked_by_button:
-        await send_order_embed(interaction, "주문 접수 — 주식", [("종목", symbol), ("베팅", won(amount))], view=view)
+    await send_order_embed(interaction, "주문 접수 — 주식", [("종목", symbol), ("베팅", won(amount))])
 
     # 3) 결과
     await asyncio.sleep(3)
@@ -186,7 +159,7 @@ async def resolve_stock(interaction: discord.Interaction, symbol: str, amount: i
     await interaction.followup.send(embed=em)
 
 # ── /면진코인 결과 처리 ─────────────────────────────────
-async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: int, invoked_by_button: bool = False):
+async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: int):
     gid, uid = interaction.guild.id, interaction.user.id
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -197,9 +170,7 @@ async def resolve_coin(interaction: discord.Interaction, symbol: str, amount: in
             await db.execute("ROLLBACK")
             return await send_insufficient(interaction, bal, amount)
 
-    view = None if invoked_by_button else AllInView("coin", symbol)
-    if not invoked_by_button:
-        await send_order_embed(interaction, "주문 접수 — 코인", [("코인", symbol), ("베팅", won(amount))], view=view)
+    await send_order_embed(interaction, "주문 접수 — 코인", [("코인", symbol), ("베팅", won(amount))])
 
     await asyncio.sleep(3)
     rng = await get_market_range(gid, "coin", symbol)
