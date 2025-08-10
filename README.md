@@ -20,3 +20,4 @@ https://discord.com/oauth2/authorize?client_id=1403372955546812467
 - 칭호 기능
 - 관리자 명령어 세분화 -> /면진관리자A B C ..
 - /면진핑 -> 봇의 핑 확인
+- 면진도움말 다시 추가
