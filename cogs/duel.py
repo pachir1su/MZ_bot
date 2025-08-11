@@ -1,4 +1,4 @@
-import aiosqlite, asyncio, secrets, time
+import aiosqlite, asyncio, secrets, time, math
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
@@ -46,12 +46,11 @@ async def get_min_bet(gid: int) -> int:
         return row[0] if row and row[0] else 1000
 
 # ===== 승률 모델(로지스틱) =====
-import math
 def duel_win_prob(att_lv: int, def_lv: int) -> float:
     """
-    무기 레벨 영향 대폭 강화: 로지스틱 p = 1/(1+e^{-k*Δ})
-    - k = 0.20 (Δ=5 → ~0.73, Δ=10 → ~0.88)
-    - 최종 p는 [0.02, 0.985]로 클램프(운 요소 유지)
+    무기 레벨 영향 강화: p = 1/(1+e^{-k*Δ})
+    k=0.20, Δ=5 → ~0.73, Δ=10 → ~0.88
+    최소/최대 클램프: [0.02, 0.985]
     """
     k = 0.20
     delta = att_lv - def_lv
