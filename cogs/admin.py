@@ -13,6 +13,32 @@ def owner_only():
         return dev_mode or (interaction.user.id == owner_id)
     return app_commands.check(predicate)
 
+def _env_int(name: str, default: int = 0) -> int:
+    v = os.getenv(name, "")
+    try:
+        return int(v) if v else default
+    except Exception:
+        return default
+
+def is_admin(member: discord.Member) -> bool:
+    """소유자/DEV 또는 역할/권한 기반 관리자 판정"""
+    # 소유자/DEV
+    if os.getenv("DEV_MODE", "0") == "1":
+        return True
+    owner_id = _env_int("OWNER_ID", 0)
+    if owner_id and member.id == owner_id:
+        return True
+    # 서버 권한(기본 허용)
+    if os.getenv("ALLOW_MANAGE_GUILD_ADMIN", "1") == "1":
+        if getattr(member, "guild_permissions", None) and member.guild_permissions.manage_guild:
+            return True
+    # 역할 ID 기반(환경변수 중 하나라도 매칭되면 관리자)
+    for key in ("ADMIN_ROLE_ID", "ADMIN_ROLE_A_ID", "ADMIN_ROLE_B_ID", "ADMIN_ROLE_C_ID"):
+        rid = _env_int(key, 0)
+        if rid and any(r.id == rid for r in getattr(member, "roles", [])):
+            return True
+    return False
+
 # ───────── 설정/DB 유틸 ─────────
 async def get_settings(db, gid: int):
     cur = await db.execute(
@@ -344,15 +370,10 @@ class ToolsView(discord.ui.View):
 
 # ═══════════════════════════════════════════════════════════════════════════
 #                               MarketView v2
-#   - 탭(주식/코인) · 검색 · 페이지네이션 · 다중선택
-#   - 단건/일괄: 편집/삭제/활성토글/복제/프리셋
-#   - 저장 전 미리보기(확인) · 30초 Undo
 # ═══════════════════════════════════════════════════════════════════════════
+PAGE_SIZE = 25
+UNDO_TTL = 30.0
 
-PAGE_SIZE = 25  # Discord StringSelect 옵션 최대치
-UNDO_TTL = 30.0 # 초
-
-# 간단 Undo: SQL 역연산들 저장
 class UndoView(discord.ui.View):
     def __init__(self, sql_ops: list[tuple[str, tuple]], title: str):
         super().__init__(timeout=UNDO_TTL)
@@ -371,7 +392,6 @@ class UndoView(discord.ui.View):
         except Exception as e:
             await interaction.response.edit_message(content=f"Undo 중 오류: {type(e).__name__}: {e}", view=None)
 
-# 공통 쿼리
 async def count_items(gid: int, typ: str, keyword: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         like = f"%{keyword.strip()}%" if keyword else "%"
@@ -394,7 +414,6 @@ async def list_items(gid: int, typ: str, keyword: str, page: int, limit: int):
         rows = await cur.fetchall()
         return [{"name": n, "lo": lo, "hi": hi, "en": en} for (n,lo,hi,en) in rows]
 
-# 프리셋 조정 함수들
 def normalize_percent(txt: str) -> float:
     s = txt.strip().replace("%","")
     return float(s)
@@ -419,7 +438,6 @@ def preset_apply(lo: float, hi: float, kind: str) -> tuple[float,float]:
 def ev_of(lo: float, hi: float) -> float:
     return round((lo + hi)/2.0, 3)
 
-# 편집 미리보기 → 확인 단계
 class EditConfirmView(discord.ui.View):
     def __init__(self, gid: int, typ: str, name: str, lo: float, hi: float, en: int):
         super().__init__(timeout=120)
@@ -792,12 +810,13 @@ class AdminMainView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await interaction.edit_original_response(content="쿨타임 메뉴", embed=None, view=CooldownView(self.gid))
 
-    @discord.ui.button(label="도구", style=discord.ButtonStyle.secondary, row=0)
+    # 줄폭 초과 방지: 아래 두 버튼은 row=1로 이동
+    @discord.ui.button(label="도구", style=discord.ButtonStyle.secondary, row=1)
     async def to_tools(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
         await interaction.edit_original_response(content="도구 메뉴", embed=None, view=ToolsView(self.gid))
 
-    @discord.ui.button(label="마켓 편집", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="마켓 편집", style=discord.ButtonStyle.success, row=1)
     async def to_market(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
         await ensure_seed_markets_admin(self.gid)
@@ -806,6 +825,14 @@ class AdminMainView(discord.ui.View):
         await mv.refresh(interaction)
 
 # ───────── 슬래시 명령 ─────────
+@app_commands.command(name="menjin_admin", description="면진관리자 메뉴 열기")
+async def menjin_admin(interaction: discord.Interaction):
+    if not is_admin(interaction.user):  # decorator 대신 내부 처리로 친절 안내
+        return await interaction.response.send_message("권한이 없습니다.", ephemeral=True)
+    gid = interaction.guild.id
+    await ensure_seed_markets_admin(gid)
+    await interaction.response.send_message(embed=admin_main_embed(), view=AdminMainView(gid), ephemeral=True)
+
 @app_commands.command(name="mz_admin", description="Open admin menu (owner only)")
 @owner_only()
 async def mz_admin(interaction: discord.Interaction):
@@ -814,4 +841,5 @@ async def mz_admin(interaction: discord.Interaction):
     await interaction.response.send_message(embed=admin_main_embed(), view=AdminMainView(gid), ephemeral=True)
 
 async def setup(bot: discord.Client):
-    bot.tree.add_command(mz_admin)
+    bot.tree.add_command(menjin_admin)  # 단일 명령어
+    bot.tree.add_command(mz_admin)      # 필요 시 유지
