@@ -176,7 +176,7 @@ class DuelChallengeView(AutoCancelView):
             uid_w, uid_l = (uid_a, uid_b) if a_wins else (uid_b, uid_a)
             lv_w, lv_l   = (lv_a, lv_b) if a_wins else (lv_b, lv_a)
 
-            # 애니메이션(메시지 수정) — 진행 중 UI
+            # 애니메이션(메시지 수정)
             for t in range(0, 101, 20):
                 await self.message.edit(embed=fight_embed(
                     interaction.guild.get_member(uid_a),
@@ -186,7 +186,6 @@ class DuelChallengeView(AutoCancelView):
                 await asyncio.sleep(0.4)
 
             # 정산
-            # 승자 +stake / 패자 -stake
             cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid_w))
             row = await cur.fetchone(); bal_w = row[0]
             cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid_l))
