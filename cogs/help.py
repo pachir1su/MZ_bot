@@ -43,10 +43,9 @@ class HelpCog(commands.Cog):
         )
 
         em.add_field(
-            name="유틸/관리",
+            name="유틸",
             value=(
-                "• **/면진핑** — 봇의 핑 확인\n"
-                "• **/면진관리자** — 설정/잔액/쿨타임/마켓/강화설정/결과강제"
+                "• **/면진핑** — 봇의 핑 확인"
             ),
             inline=False
         )
