@@ -73,8 +73,12 @@ class AutoCancelView(discord.ui.View):
         self.message: Optional[discord.Message] = None
         self.owner_id: Optional[int] = None
         self._timeout_seconds = timeout_seconds
+        self.finalized: bool = False  # ✅ 결과 확정 시 타이머 중단 플래그
 
     async def on_timeout(self):
+        # ✅ 이미 종료된 상태면 아무것도 하지 않음
+        if self.finalized:
+            return
         try:
             for c in self.children:
                 if hasattr(c, "disabled"):
@@ -176,6 +180,8 @@ class DuelChallengeView(AutoCancelView):
                     await self.message.edit(embed=em, view=None)
                 else:
                     await interaction.edit_original_response(embed=em, view=None)
+                self.finalized = True  # ✅ 결과 확정
+                self.stop()            # ✅ 타이머 중단
                 return
 
             # 승패 판정
@@ -211,6 +217,8 @@ class DuelChallengeView(AutoCancelView):
                     await self.message.edit(embed=em, view=None)
                 else:
                     await interaction.edit_original_response(embed=em, view=None)
+                self.finalized = True
+                self.stop()
                 return
 
             new_bal_w = bal_w + stake
@@ -234,6 +242,8 @@ class DuelChallengeView(AutoCancelView):
             await self.message.edit(embed=em, view=None)
         else:
             await interaction.edit_original_response(embed=em, view=None)
+        self.finalized = True   # ✅ 결과 확정
+        self.stop()             # ✅ 타이머 중단
 
     @discord.ui.button(label="거절", style=discord.ButtonStyle.danger, row=0)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -243,6 +253,8 @@ class DuelChallengeView(AutoCancelView):
         await interaction.response.edit_message(embed=discord.Embed(
             title="맞짱 거절됨", description=f"{interaction.user.mention} 님이 대결을 거절했습니다.", color=0x95a5a6
         ), view=None)
+        self.finalized = True   # ✅ 결과 확정
+        self.stop()             # ✅ 타이머 중단
 
 # ===== /면진맞짱 =====
 @app_commands.command(name="mz_duel", description="맞짱: 상대와 동일 금액을 베팅해 승부(0=전액)")
