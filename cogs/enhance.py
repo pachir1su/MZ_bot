@@ -17,11 +17,10 @@ try:
 except Exception:
     COST_MULT = 1.0
 
-# ───────── 강화 테이블: 1~30 (요청 사양) ─────────
+# ───────── 강화 테이블: 1~30 ─────────
 # name, S/F/D/B (%) 합=100, cost(원)
 ENH_TABLE = [
-    # idx 0은 더미(레벨=0 → 다음 1강)
-    None,
+    None,  # idx 0 dummy
     {"name":"샤프심",        "s":100, "f":0,  "d":0,  "b":0,  "cost":  2000},
     {"name":"연필",          "s":98,  "f":2,  "d":0,  "b":0,  "cost":  2200},
     {"name":"페트병",        "s":96,  "f":4,  "d":0,  "b":0,  "cost":  2500},
@@ -53,7 +52,6 @@ ENH_TABLE = [
     {"name":"롱기누스의 창", "s":16,  "f":10, "d":46, "b":28, "cost":4800000},
     {"name":"면진검",        "s":15,  "f":10, "d":47, "b":28, "cost":6500000},
 ]
-
 MAX_LV = 30
 
 # ───────── DB 유틸 ─────────
@@ -88,6 +86,23 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, (meta and str(meta)) or "{}", int(time.time()))
     )
 
+# ───────── 진행바 유틸 ─────────
+def _progress_bar(p: float, width: int = 12) -> str:
+    p = max(0.0, min(1.0, p))
+    fill = int(round(p * width))
+    return "▰" * fill + "▱" * (width - fill)
+
+def _progress_embed(user: discord.Member, curr_lv: int, next_name: str, pct: int):
+    em = discord.Embed(title="강화 준비 중…", color=0xF1C40F)
+    try:
+        em.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    except Exception:
+        em.set_author(name=user.display_name)
+    em.add_field(name="현재", value=f"LV{curr_lv}", inline=True)
+    em.add_field(name="다음", value=next_name, inline=True)
+    em.add_field(name="진행", value=f"{_progress_bar(pct/100)} **{pct}%**", inline=False)
+    return em
+
 # ───────── UI View(자동 취소) ─────────
 class AutoCancelView(discord.ui.View):
     def __init__(self, timeout_seconds: int = 60):
@@ -108,7 +123,7 @@ class AutoCancelView(discord.ui.View):
         except Exception:
             pass
 
-# ───────── 강화 View ─────────
+# ───────── 임베드 & 이름 ─────────
 def lv_name(lv: int) -> str:
     if lv <= 0:
         return "맨손"
@@ -141,6 +156,7 @@ def enhance_embed(user: discord.Member, curr_lv: int, bal: int):
     em.set_footer(text=f"오늘 {now_kst().strftime('%H:%M')}")
     return em
 
+# ───────── 강화 View ─────────
 class EnhanceView(AutoCancelView):
     def __init__(self, gid: int, uid: int, curr_lv: int, bal: int):
         super().__init__(timeout_seconds=60)
@@ -155,6 +171,13 @@ class EnhanceView(AutoCancelView):
         self.add_item(self.btn_enh)
         self.add_item(self.btn_cancel)
 
+    # 소유자만 조작 가능
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("이 메뉴는 생성한 사용자만 조작할 수 있습니다.", ephemeral=True)
+            return False
+        return True
+
     async def _refresh(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -162,7 +185,6 @@ class EnhanceView(AutoCancelView):
             self.bal = u["balance"]
             self.curr_lv = await get_level(db, self.gid, self.uid)
             await db.commit()
-
         self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
         if self.message:
             await self.message.edit(embed=enhance_embed(interaction.user, self.curr_lv, self.bal), view=self)
@@ -187,7 +209,6 @@ class EnhanceView(AutoCancelView):
             bal = u["balance"]
             lv = await get_level(db, self.gid, self.uid)
 
-            # 최신 상태 반영
             self.curr_lv, self.bal = lv, bal
             if self.curr_lv >= MAX_LV:
                 await db.execute("ROLLBACK")
@@ -199,30 +220,34 @@ class EnhanceView(AutoCancelView):
                     f"잔액 부족: 필요 {won(cost)} / 현재 {won(bal)}", ephemeral=True
                 )
 
-            # 비용 차감
+            # 비용 선차감
             new_bal = bal - cost
             await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, self.gid, self.uid))
             await write_ledger(db, self.gid, self.uid, "enhance_cost", -cost, new_bal, {"to": nxt})
+            await db.commit()
 
-            # 결과 추출
-            # 0..9999 난수 기반, s/f/d/b 순으로 구간 배정
-            roll = secrets.randbelow(10000) / 100.0  # 0.00 ~ 99.99
-            s, f, d, b = row["s"], row["f"], row["d"], row["b"]
-            outcome = "success"
-            if roll < s:
-                outcome = "success"
-                new_lv = min(self.curr_lv + 1, MAX_LV)
-            elif roll < s + f:
-                outcome = "fail"
-                new_lv = self.curr_lv
-            elif roll < s + f + d:
-                outcome = "down"
-                new_lv = max(0, self.curr_lv - 1)
-            else:
-                outcome = "break"
-                new_lv = 0  # 파괴 시 0강
+        # 진행 애니메이션(~3초)
+        await interaction.response.defer()
+        for pct in (0, 20, 40, 60, 80, 100):
+            em_prog = _progress_embed(interaction.user, self.curr_lv, f"LV{nxt} 『{row['name']}』", pct)
+            if self.message: await self.message.edit(embed=em_prog, view=self)
+            else: await interaction.edit_original_response(embed=em_prog, view=self)
+            await asyncio.sleep(0.5)
 
-            # 레벨 반영
+        # 결과 계산
+        roll = secrets.randbelow(10000) / 100.0
+        s, f, d, b = row["s"], row["f"], row["d"], row["b"]
+        if roll < s:
+            outcome, new_lv = "success", min(self.curr_lv + 1, MAX_LV)
+        elif roll < s + f:
+            outcome, new_lv = "fail", self.curr_lv
+        elif roll < s + f + d:
+            outcome, new_lv = "down", max(0, self.curr_lv - 1)
+        else:
+            outcome, new_lv = "break", 0  # 파괴 시 0강
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
             await set_level(db, self.gid, self.uid, new_lv)
             await write_ledger(
                 db, self.gid, self.uid, "enhance_result", 0, new_bal,
@@ -230,9 +255,7 @@ class EnhanceView(AutoCancelView):
             )
             await db.commit()
 
-        # 화면 갱신
-        self.curr_lv = new_lv
-        self.bal = new_bal
+        self.curr_lv, self.bal = new_lv, new_bal
         result_txt = {
             "success": f"강화 **성공**! → LV{self.curr_lv} 『{lv_name(self.curr_lv)}』",
             "fail":    "강화 **실패**(등급 유지)",
@@ -243,9 +266,14 @@ class EnhanceView(AutoCancelView):
         em = enhance_embed(interaction.user, self.curr_lv, self.bal)
         em.insert_field_at(0, name="결과", value=result_txt, inline=False)
 
-        # 최대 레벨이면 버튼 비활성화
         self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
-        await interaction.response.edit_message(embed=em, view=self)
+
+        # 결과 확정 → 타임아웃이 덮지 않도록 보호
+        self.finalized = True
+        if self.message:
+            await self.message.edit(embed=em, view=self)
+        else:
+            await interaction.edit_original_response(embed=em, view=self)
 
 # ───────── Slash 명령 ─────────
 @app_commands.command(name="mz_enhance", description="무기 강화 메뉴를 엽니다")
