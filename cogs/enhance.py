@@ -1,5 +1,4 @@
-# cogs/enhance.py
-import aiosqlite, asyncio, secrets, time
+import os, aiosqlite, asyncio, secrets, time
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
@@ -7,79 +6,65 @@ from typing import Optional
 
 DB_PATH = "economy.db"
 
-# === 정책/연출 ===
-REVEAL_DELAY   = 2.5
-PROGRESS_TICKS = 5
-
-# 비용 곡선( +10까지 완만, 이후 구간별 상승 )
-BASE_COST          = 5_000
-GROWTH_BELOW_10    = 1.35    # 0~9
-GROWTH_10_TO_19    = 1.55    # 10~19
-GROWTH_20_TO_29    = 1.75    # 20~29
-
-MAX_LEVEL      = 30         # +30 캡
-DOWNGRADE_FROM = 10         # +10 이상 실패 시 -1
-
-# === 성공률( +10까지 쉽게 ) ===
-def success_rate(level: int) -> int:
-    if level >= MAX_LEVEL:
-        return 0
-    if level <= 9:
-        return max(65, 95 - level * 3)         # 0:95 → 9:68(최저 65)
-    if level <= 19:
-        return max(10, 60 - (level - 10) * 5)  # 10:60 → 19:15(최저 10)
-    return max(3, 12 - (level - 20) * 1)       # 20:12 → 29:3
-
-# 레벨별 무기 스킨
-WEAPON_SKINS = {
-    0: {"name": "나무막대",       "art": None},
-    1: {"name": "돌몽둥이",       "art": None},
-    2: {"name": "연필",          "art": None},
-    3: {"name": "몽당연필",       "art": None},
-    4: {"name": "샤프",          "art": None},
-    5: {"name": "강철볼펜",       "art": None},
-    6: {"name": "스테인리스 자",  "art": None},
-    7: {"name": "해머",          "art": None},
-    8: {"name": "광석검",         "art": None},
-    9: {"name": "플라즈마 커터",  "art": None},
-    10:{"name": "우주망치",       "art": None},
-}
-
-# === 공용 유틸 ===
+# ───────── 시간/표시 유틸 ─────────
 KST = timezone(timedelta(hours=9))
 def now_kst() -> datetime: return datetime.now(KST)
 def won(n: int) -> str: return f"{n:,}₩"
 
-def level_cost(level: int) -> int:
-    if level <= 9:   growth = GROWTH_BELOW_10
-    elif level <= 19:growth = GROWTH_10_TO_19
-    else:            growth = GROWTH_20_TO_29
-    raw = BASE_COST * (growth ** level)
-    return int(round(raw / 100)) * 100
+# ───────── 전역 배율(서버 물가 튜닝) ─────────
+try:
+    COST_MULT = float(os.getenv("ENH_COST_MULT", "1.0"))
+except Exception:
+    COST_MULT = 1.0
 
-def weapon_name(level: int) -> str:
-    meta = WEAPON_SKINS.get(level)
-    if meta: return f"LV{level} 「{meta['name']}」"
-    return f"강화무기 Lv{level}"
+# ───────── 강화 테이블: 1~30 (요청 사양) ─────────
+# name, S/F/D/B (%) 합=100, cost(원)
+ENH_TABLE = [
+    # idx 0은 더미(레벨=0 → 다음 1강)
+    None,
+    {"name":"샤프심",        "s":100, "f":0,  "d":0,  "b":0,  "cost":  2000},
+    {"name":"연필",          "s":98,  "f":2,  "d":0,  "b":0,  "cost":  2200},
+    {"name":"페트병",        "s":96,  "f":4,  "d":0,  "b":0,  "cost":  2500},
+    {"name":"파리채",        "s":94,  "f":6,  "d":0,  "b":0,  "cost":  2900},
+    {"name":"우산",          "s":90,  "f":10, "d":0,  "b":0,  "cost":  3400},
+    {"name":"노트북",        "s":87,  "f":13, "d":0,  "b":0,  "cost":  4000},
+    {"name":"낡은 단검",     "s":84,  "f":16, "d":0,  "b":0,  "cost":  5000},
+    {"name":"쓸만한 단검",   "s":80,  "f":20, "d":0,  "b":0,  "cost":  6500},
+    {"name":"견고한 단검",   "s":76,  "f":24, "d":0,  "b":0,  "cost":  8500},
+    {"name":"빠따",          "s":73,  "f":27, "d":0,  "b":0,  "cost": 11000},
+    {"name":"전기톱",        "s":65,  "f":25, "d":10, "b":0,  "cost": 15000},
+    {"name":"롱소드",        "s":62,  "f":24, "d":12, "b":2,  "cost": 20000},
+    {"name":"화염의 검",     "s":59,  "f":24, "d":14, "b":3,  "cost": 28000},
+    {"name":"냉기의 검",     "s":56,  "f":23, "d":16, "b":5,  "cost": 40000},
+    {"name":"듀얼블레이드",  "s":53,  "f":22, "d":18, "b":7,  "cost": 60000},
+    {"name":"심판자의 검",   "s":50,  "f":21, "d":20, "b":9,  "cost": 85000},
+    {"name":"엑스칼리버",    "s":47,  "f":20, "d":22, "b":11, "cost":120000},
+    {"name":"플라즈마 소드", "s":44,  "f":19, "d":24, "b":13, "cost":170000},
+    {"name":"천총운검",      "s":41,  "f":18, "d":26, "b":15, "cost":240000},
+    {"name":"사인참사검",    "s":38,  "f":17, "d":28, "b":17, "cost":330000},
+    {"name":"뒤랑칼",        "s":35,  "f":17, "d":30, "b":18, "cost":450000},
+    {"name":"파멸의 대검",   "s":32,  "f":16, "d":33, "b":19, "cost":600000},
+    {"name":"여명의 검",     "s":29,  "f":15, "d":35, "b":21, "cost":800000},
+    {"name":"키샨",          "s":26,  "f":14, "d":38, "b":22, "cost":1100000},
+    {"name":"영원의 창",     "s":23,  "f":14, "d":40, "b":23, "cost":1500000},
+    {"name":"정의의 저울",   "s":21,  "f":13, "d":42, "b":24, "cost":2000000},
+    {"name":"사신의 낫",     "s":19,  "f":12, "d":43, "b":26, "cost":2700000},
+    {"name":"아스트라페",    "s":17,  "f":11, "d":45, "b":27, "cost":3600000},
+    {"name":"롱기누스의 창", "s":16,  "f":10, "d":46, "b":28, "cost":4800000},
+    {"name":"면진검",        "s":15,  "f":10, "d":47, "b":28, "cost":6500000},
+]
 
-def progress_bar(p: float, width: int = 12) -> str:
-    p = max(0.0, min(1.0, p))
-    filled = int(round(p * width))
-    return "▰" * filled + "▱" * (width - filled)
+MAX_LV = 30
 
+# ───────── DB 유틸 ─────────
 async def get_user(db, gid: int, uid: int):
     cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid))
     row = await cur.fetchone()
-    if row: return {"balance": row[0]}
+    if row:
+        return {"balance": row[0]}
     await db.execute("INSERT INTO users(guild_id,user_id,balance) VALUES(?,?,?)", (gid, uid, 0))
     await db.commit()
     return {"balance": 0}
-
-async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
-    await db.execute(
-        "INSERT INTO ledger(guild_id,user_id,kind,amount,balance_after,meta,ts) VALUES(?,?,?,?,?,?,?)",
-        (gid, uid, kind, amount, bal_after, (meta and str(meta)) or "{}", int(time.time()))
-    )
 
 async def ensure_weapon_row(db, gid: int, uid: int):
     await db.execute(
@@ -88,231 +73,193 @@ async def ensure_weapon_row(db, gid: int, uid: int):
     )
 
 async def get_level(db, gid: int, uid: int) -> int:
+    await ensure_weapon_row(db, gid, uid)
     cur = await db.execute("SELECT level FROM user_weapons WHERE guild_id=? AND user_id=?", (gid, uid))
     row = await cur.fetchone()
     return row[0] if row else 0
 
-# === 공용: 자동 취소 베이스 ===
+async def set_level(db, gid: int, uid: int, lv: int):
+    await db.execute("UPDATE user_weapons SET level=?, updated_at=? WHERE guild_id=? AND user_id=?",
+                     (lv, int(time.time()), gid, uid))
+
+async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
+    await db.execute(
+        "INSERT INTO ledger(guild_id,user_id,kind,amount,balance_after,meta,ts) VALUES(?,?,?,?,?,?,?)",
+        (gid, uid, kind, amount, bal_after, (meta and str(meta)) or "{}", int(time.time()))
+    )
+
+# ───────── UI View(자동 취소) ─────────
 class AutoCancelView(discord.ui.View):
-    """버튼이 1분간 상호작용 없으면 자동 취소(관리자 메뉴에는 사용하지 않음)."""
     def __init__(self, timeout_seconds: int = 60):
         super().__init__(timeout=timeout_seconds)
         self.message: Optional[discord.Message] = None
-        self.owner_id: Optional[int] = None
         self._timeout_seconds = timeout_seconds
+        self.finalized = False
 
     async def on_timeout(self):
+        if self.finalized or not self.message:
+            return
         try:
             for c in self.children:
                 if hasattr(c, "disabled"):
                     c.disabled = True
-            if self.message:
-                em = discord.Embed(
-                    title="취소되었습니다",
-                    description=f"{self._timeout_seconds}초가 지나 자동으로 취소되었습니다.",
-                    color=0xE74C3C
-                )
-                await self.message.edit(embed=em, view=None)
+            em = discord.Embed(title="취소되었습니다", description=f"{self._timeout_seconds}초가 지나 자동으로 취소되었습니다.", color=0xE74C3C)
+            await self.message.edit(embed=em, view=None)
         except Exception:
             pass
 
-# === 패널 임베드 ===
-def build_panel_embed(member: discord.Member, level: int, bal: int):
-    rate = success_rate(level)
-    fail = max(0, 100 - rate)
-    em = discord.Embed(
-        title="무기 강화",
-        description=f"당신이 보유한 무기는 **{weapon_name(level)}** 입니다.",
-        color=0x2D9CDB
-    )
-    try:
-        em.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-    except Exception:
-        em.set_author(name=member.display_name)
+# ───────── 강화 View ─────────
+def lv_name(lv: int) -> str:
+    if lv <= 0:
+        return "맨손"
+    if lv > MAX_LV:
+        lv = MAX_LV
+    return ENH_TABLE[lv]["name"]
 
-    if level >= MAX_LEVEL:
-        em.add_field(name="상태", value=f"최대 등급 도달(+{MAX_LEVEL})", inline=False)
+def next_row(curr_lv: int):
+    nxt = min(curr_lv + 1, MAX_LV)
+    return ENH_TABLE[nxt], nxt
+
+def enhance_embed(user: discord.Member, curr_lv: int, bal: int):
+    row, nxt = next_row(curr_lv)
+    title = f"당신이 보유한 무기는\nLV{curr_lv}『{lv_name(curr_lv)}』" if curr_lv>0 else "당신은 아직 무기가 없습니다"
+    em = discord.Embed(title=title, color=0x3498db)
+    try:
+        em.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    except Exception:
+        em.set_author(name=user.display_name)
+
+    if curr_lv >= MAX_LV:
+        em.add_field(name="강화 상태", value=f"이미 **최대 레벨(LV{MAX_LV})** 입니다.", inline=False)
     else:
-        em.add_field(name="강화비용", value=won(level_cost(level)), inline=True)
-        em.add_field(name="성공률", value=f"{rate}%", inline=True)
-        em.add_field(name="실패률", value=f"{fail}%", inline=True)
-        if DOWNGRADE_FROM is not None and level >= DOWNGRADE_FROM:
-            em.add_field(name="\u200b", value=f"※ **실패 시 1단계 하락** (+{DOWNGRADE_FROM} 이상)", inline=False)
+        cost = int(round(row["cost"] * COST_MULT))
+        em.add_field(name="다음 단계", value=f"LV{nxt} 『{row['name']}』", inline=False)
+        em.add_field(name="강화비용", value=won(cost), inline=True)
+        em.add_field(name="성공/실패/하락/파괴", value=f"{row['s']}% / {row['f']}% / {row['d']}% / {row['b']}%", inline=True)
 
     em.add_field(name="잔액", value=won(bal), inline=False)
-    art = WEAPON_SKINS.get(level, {}).get("art")
-    if art: em.set_image(url=art)
+    em.set_footer(text=f"오늘 {now_kst().strftime('%H:%M')}")
     return em
 
-# === View: 버튼/흐름(자동 취소 상속) ===
 class EnhanceView(AutoCancelView):
-    def __init__(self, gid: int, uid: int):
+    def __init__(self, gid: int, uid: int, curr_lv: int, bal: int):
         super().__init__(timeout_seconds=60)
-        self.gid = gid
-        self.uid = uid
-        self.busy = False
+        self.gid, self.uid = gid, uid
+        self.curr_lv, self.bal = curr_lv, bal
+
+        self.btn_enh = discord.ui.Button(label="강화하기", style=discord.ButtonStyle.primary, row=0, disabled=(curr_lv>=MAX_LV))
+        self.btn_cancel = discord.ui.Button(label="취소", style=discord.ButtonStyle.secondary, row=0)
+        self.btn_enh.callback = self._do_enhance
+        self.btn_cancel.callback = self._do_cancel
+
+        self.add_item(self.btn_enh)
+        self.add_item(self.btn_cancel)
 
     async def _refresh(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
-            await ensure_weapon_row(db, self.gid, self.uid)
-            level = await get_level(db, self.gid, self.uid)
+            await db.execute("BEGIN IMMEDIATE")
             u = await get_user(db, self.gid, self.uid)
-            bal = u["balance"]
+            self.bal = u["balance"]
+            self.curr_lv = await get_level(db, self.gid, self.uid)
+            await db.commit()
 
-        can_enhance = (level < MAX_LEVEL) and (bal >= level_cost(level))
-        new_view = EnhanceView(self.gid, self.uid)
-        new_view.owner_id = self.uid
-        em = build_panel_embed(interaction.user, level, bal)
-        for c in new_view.children:
-            if isinstance(c, discord.ui.Button) and c.label == "강화하기":
-                c.disabled = not can_enhance
-
+        self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
         if self.message:
-            await self.message.edit(embed=em, view=new_view)
-            new_view.message = self.message
-        else:
-            await interaction.edit_original_response(embed=em, view=new_view)
-            new_view.message = await interaction.original_response()
+            await self.message.edit(embed=enhance_embed(interaction.user, self.curr_lv, self.bal), view=self)
 
-    @discord.ui.button(label="강화하기", style=discord.ButtonStyle.primary, row=0)
-    async def do_enhance(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("본인만 사용할 수 있습니다.", ephemeral=True)
-        if self.busy:
-            return await interaction.response.send_message("진행 중입니다.", ephemeral=True)
-        self.busy = True
-        await interaction.response.defer()
+    async def _do_cancel(self, interaction: discord.Interaction):
+        self.finalized = True
+        for c in self.children:
+            c.disabled = True
+        await interaction.response.edit_message(embed=discord.Embed(title="취소되었습니다", color=0x95a5a6), view=None)
+        self.stop()
 
-        # 비용 차감
+    async def _do_enhance(self, interaction: discord.Interaction):
+        if self.curr_lv >= MAX_LV:
+            return await interaction.response.send_message("이미 최대 레벨입니다.", ephemeral=True)
+
+        row, nxt = next_row(self.curr_lv)
+        cost = int(round(row["cost"] * COST_MULT))
+
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
-            await ensure_weapon_row(db, self.gid, self.uid)
-            level = await get_level(db, self.gid, self.uid)
             u = await get_user(db, self.gid, self.uid)
             bal = u["balance"]
+            lv = await get_level(db, self.gid, self.uid)
 
-            if level >= MAX_LEVEL:
+            # 최신 상태 반영
+            self.curr_lv, self.bal = lv, bal
+            if self.curr_lv >= MAX_LV:
                 await db.execute("ROLLBACK")
-                self.busy = False
-                return await interaction.followup.send(f"이미 최대 레벨(+{MAX_LEVEL})입니다.", ephemeral=True)
+                return await interaction.response.send_message("이미 최대 레벨입니다.", ephemeral=True)
 
-            cost = level_cost(level)
-            rate = success_rate(level)
             if bal < cost:
                 await db.execute("ROLLBACK")
-                self.busy = False
-                return await interaction.followup.send(f"잔액 부족: 필요 {won(cost)}, 현재 {won(bal)}", ephemeral=True)
+                return await interaction.response.send_message(
+                    f"잔액 부족: 필요 {won(cost)} / 현재 {won(bal)}", ephemeral=True
+                )
 
+            # 비용 차감
             new_bal = bal - cost
-            await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?",
-                             (new_bal, self.gid, self.uid))
-            await write_ledger(db, self.gid, self.uid, "enhance_fee", -cost, new_bal,
-                               {"from": level, "to": level+1, "rate": rate})
+            await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, self.gid, self.uid))
+            await write_ledger(db, self.gid, self.uid, "enhance_cost", -cost, new_bal, {"to": nxt})
+
+            # 결과 추출
+            # 0..9999 난수 기반, s/f/d/b 순으로 구간 배정
+            roll = secrets.randbelow(10000) / 100.0  # 0.00 ~ 99.99
+            s, f, d, b = row["s"], row["f"], row["d"], row["b"]
+            outcome = "success"
+            if roll < s:
+                outcome = "success"
+                new_lv = min(self.curr_lv + 1, MAX_LV)
+            elif roll < s + f:
+                outcome = "fail"
+                new_lv = self.curr_lv
+            elif roll < s + f + d:
+                outcome = "down"
+                new_lv = max(0, self.curr_lv - 1)
+            else:
+                outcome = "break"
+                new_lv = 0  # 파괴 시 0강
+
+            # 레벨 반영
+            await set_level(db, self.gid, self.uid, new_lv)
+            await write_ledger(
+                db, self.gid, self.uid, "enhance_result", 0, new_bal,
+                {"from": self.curr_lv, "to": new_lv, "nxt": nxt, "roll": roll, "s": s, "f": f, "d": d, "b": b, "outcome": outcome}
+            )
             await db.commit()
 
-        # 애니메이션
-        for i in range(1, PROGRESS_TICKS + 1):
-            p = i / PROGRESS_TICKS
-            em = discord.Embed(title="강화 진행 중…", color=0xF1C40F)
-            try:
-                em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-            except Exception:
-                em.set_author(name=interaction.user.display_name)
-            em.add_field(name="무기", value=weapon_name(level), inline=True)
-            em.add_field(name="다음 등급", value=f"+{level+1}", inline=True)
-            em.add_field(name="성공률", value=f"{success_rate(level)}%", inline=True)
-            em.add_field(name="진행", value=f"{progress_bar(p)} **{int(p*100)}%**", inline=False)
-            art = WEAPON_SKINS.get(level, {}).get("art")
-            if art: em.set_image(url=art)
-            if self.message:
-                await self.message.edit(embed=em, view=self)
-            else:
-                await interaction.edit_original_response(embed=em, view=self)
-            await asyncio.sleep(REVEAL_DELAY / PROGRESS_TICKS)
+        # 화면 갱신
+        self.curr_lv = new_lv
+        self.bal = new_bal
+        result_txt = {
+            "success": f"강화 **성공**! → LV{self.curr_lv} 『{lv_name(self.curr_lv)}』",
+            "fail":    "강화 **실패**(등급 유지)",
+            "down":    f"강화 **실패**(등급 하락) → LV{self.curr_lv}",
+            "break":   "강화 **실패**(무기 **파괴**) → LV0",
+        }[outcome]
 
-        # 판정 & 반영
-        roll = secrets.randbelow(100) + 1
-        success = (roll <= success_rate(level))
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute("SELECT level FROM user_weapons WHERE guild_id=? AND user_id=?",
-                                   (self.gid, self.uid))
-            row = await cur.fetchone()
-            cur_level = row[0] if row else 0
-            new_level = cur_level
-            if success:
-                new_level = min(MAX_LEVEL, cur_level + 1)
-            else:
-                if DOWNGRADE_FROM is not None and cur_level >= DOWNGRADE_FROM:
-                    new_level = max(0, cur_level - 1)
+        em = enhance_embed(interaction.user, self.curr_lv, self.bal)
+        em.insert_field_at(0, name="결과", value=result_txt, inline=False)
 
-            await db.execute("UPDATE user_weapons SET level=?, updated_at=? WHERE guild_id=? AND user_id=?",
-                             (new_level, int(time.time()), self.gid, self.uid))
-            cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?",
-                                   (self.gid, self.uid))
-            bal_row = await cur.fetchone()
-            bal_after = bal_row[0] if bal_row else 0
+        # 최대 레벨이면 버튼 비활성화
+        self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
+        await interaction.response.edit_message(embed=em, view=self)
 
-            await write_ledger(db, self.gid, self.uid, "enhance_result", 0, bal_after,
-                               {"from": cur_level, "to": new_level, "success": success,
-                                "roll": roll, "rate": success_rate(level)})
-            await db.commit()
-
-        # 결과 표시
-        color = 0x2ecc71 if success else 0xe74c3c
-        title = "강화 성공!" if success else "강화 실패"
-        em = discord.Embed(title=title, color=color)
-        try:
-            em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        except Exception:
-            em.set_author(name=interaction.user.display_name)
-        em.add_field(name="이전 등급", value=f"+{cur_level}", inline=True)
-        em.add_field(name="현재 등급", value=f"+{new_level}", inline=True)
-        em.add_field(name="잔액", value=won(bal_after), inline=False)
-        art2 = WEAPON_SKINS.get(new_level, {}).get("art")
-        if art2: em.set_image(url=art2)
-
-        if self.message:
-            await self.message.edit(embed=em, view=self)
-        else:
-            await interaction.edit_original_response(embed=em, view=self)
-
-        await asyncio.sleep(1.0)
-        await self._refresh(interaction)
-        self.busy = False
-
-    @discord.ui.button(label="취소", style=discord.ButtonStyle.secondary, row=0)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("본인만 사용할 수 있습니다.", ephemeral=True)
-        for c in self.children: c.disabled = True
-        if self.message:
-            await interaction.response.edit_message(content="강화를 종료했습니다.", view=None)
-        else:
-            await interaction.response.edit_message(content="강화를 종료했습니다.", view=None)
-
-# === /면진강화 ===
-@app_commands.command(name="mz_enhance", description="무기 강화(+30) — 1분 무응답 시 자동 취소")
+# ───────── Slash 명령 ─────────
+@app_commands.command(name="mz_enhance", description="무기 강화 메뉴를 엽니다")
 async def mz_enhance(interaction: discord.Interaction):
     gid, uid = interaction.guild.id, interaction.user.id
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         await ensure_weapon_row(db, gid, uid)
-        level = await get_level(db, gid, uid)
         u = await get_user(db, gid, uid)
-        bal = u["balance"]
+        lv = await get_level(db, gid, uid)
         await db.commit()
 
-    view = EnhanceView(gid, uid)
-    view.owner_id = uid
-    em = build_panel_embed(interaction.user, level, bal)
-
-    can_enhance = (level < MAX_LEVEL) and (bal >= level_cost(level))
-    for c in view.children:
-        if isinstance(c, discord.ui.Button) and c.label == "강화하기":
-            c.disabled = not can_enhance
-
-    await interaction.response.send_message(embed=em, view=view)
+    view = EnhanceView(gid, uid, lv, u["balance"])
+    await interaction.response.send_message(embed=enhance_embed(interaction.user, lv, u["balance"]), view=view)
     view.message = await interaction.original_response()
 
 async def setup(bot: discord.Client):
