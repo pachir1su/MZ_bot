@@ -11,15 +11,18 @@ DB_PATH = "economy.db"
 def module_exists(mod: str) -> bool:
     return importlib.util.find_spec(mod) is not None
 
+# ───────── 번역기 ─────────
 class MZTranslator(app_commands.Translator):
     async def translate(self, string: app_commands.locale_str,
                         locale: discord.Locale,
                         context: app_commands.TranslationContext) -> str | None:
         if locale is not discord.Locale.korean:
             return None
+
         loc = context.location
         data = context.data
 
+        # 명령어 이름 한글화
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
@@ -42,6 +45,7 @@ class MZTranslator(app_commands.Translator):
                 }
                 return mapping.get(data.name)
 
+        # 설명 한글화
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
@@ -59,7 +63,7 @@ class MZTranslator(app_commands.Translator):
                     "mz_coin":         "가상 코인 러시(3초 후 결과 공개, 0=전액)",
                     "mz_bankruptcy":   "잔액이 음수일 때 10분마다 부채 복구 시도",
                     "mz_enhance":      "무기 강화(+30). +10까지는 쉽게, 이후 난이도 상승",
-                    "mz_duel":         "맞짱: 무기 등급+랜덤으로 승부, 베팅 코인 정산",
+                    "mz_duel":         "맞짱: 무기 등급+랜덤으로 승부, 동일 금액 베팅(0=전액)",
                     "mz_help":         "면진이 명령어 도움말",
                 }
                 return desc_map.get(data.name)
@@ -70,9 +74,11 @@ class MZTranslator(app_commands.Translator):
                 if data.name == "symbol":   return "종목(주식)/코인(가상 자산)"
                 if data.name == "question": return "질문 내용"
                 if data.name == "member":   return "받는 사람 선택"
+                if data.name == "opponent": return "상대 멤버"
                 if data.name == "user":     return "대상 사용자"
         return None
 
+# ───────── 기본 설정/봇 생성 ─────────
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID", "").strip()
@@ -81,6 +87,7 @@ INTENTS = discord.Intents.default()
 INTENTS.message_content = False
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
+# ───────── DB 초기화 ─────────
 async def init_db():
     if not os.path.exists("models.sql"):
         return
@@ -89,6 +96,7 @@ async def init_db():
             await db.executescript(f.read())
         await db.commit()
 
+# ───────── 이벤트/셋업 ─────────
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} 로그인")
@@ -96,6 +104,7 @@ async def on_ready():
 async def setup_hook():
     await init_db()
 
+    # 코그 로드
     await bot.load_extension("cogs.economy")
     try:
         await bot.load_extension("cogs.games")
@@ -110,10 +119,13 @@ async def setup_hook():
         print("[load] cogs.genie not found — skipping")
     await bot.load_extension("cogs.markets")
     await bot.load_extension("cogs.enhance")   # 강화
-    await bot.load_extension("cogs.help")      # 도움말(분리)
+    await bot.load_extension("cogs.duel")      # 맞짱(PvP)
+    await bot.load_extension("cogs.help")      # 도움말
 
+    # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
 
+    # 길드 우선 싱크 → 그 다음 전역 정리
     gids = [g.strip() for g in DEV_GUILD_ID.split(",") if g.strip()]
     if gids:
         for gid in gids:
@@ -121,6 +133,7 @@ async def setup_hook():
             bot.tree.copy_global_to(guild=gobj)
             synced = await bot.tree.sync(guild=gobj)
             print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
+
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
         print("[sync] cleared global commands")
@@ -130,4 +143,5 @@ async def setup_hook():
 
 bot.setup_hook = setup_hook
 
+# ───────── 실행 ─────────
 bot.run(TOKEN)
