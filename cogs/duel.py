@@ -1,4 +1,3 @@
-# cogs/duel.py
 import aiosqlite, asyncio, secrets, time
 import discord
 from discord import app_commands
@@ -48,16 +47,27 @@ async def get_min_bet(gid: int) -> int:
 
 # ===== 승률 모델 =====
 def duel_win_prob(att_lv: int, def_lv: int) -> float:
-    """
-    레벨 차이 1단계마다 약 1.5% 유리(클램프 10%~90%).
-    p = 0.5 + 0.015 * (att_lv - def_lv)
-    """
+    """레벨 차이 1단계당 약 1.5% 유리(10~90% 클램프)."""
     p = 0.5 + 0.015 * (att_lv - def_lv)
     return max(0.10, min(0.90, p))
 
+# ===== 안전한 멤버 스텁/라벨 =====
+class _StubMember:
+    def __init__(self, uid: int):
+        self.id = uid
+        self.mention = f"<@{uid}>"
+        self.display_name = f"유저 {uid}"
+
+def ensure_member(guild: discord.Guild, uid: int):
+    return guild.get_member(uid) or _StubMember(uid)
+
+def member_label(guild: discord.Guild, uid: int) -> str:
+    m = guild.get_member(uid)
+    return m.display_name if m else f"유저 {uid}"
+
 # ===== 자동 취소용 베이스(View) =====
 class AutoCancelView(discord.ui.View):
-    """버튼형 상호작용: 60초 무응답 시 자동 취소(관리자 메뉴에는 사용하지 않음)."""
+    """버튼 상호작용: 60초 무응답 시 자동 취소(관리자 메뉴 제외)."""
     def __init__(self, timeout_seconds: int = 60):
         super().__init__(timeout=timeout_seconds)
         self.message: Optional[discord.Message] = None
@@ -101,16 +111,14 @@ def progress_bar(p: float, width: int = 12) -> str:
     filled = int(round(p * width))
     return "▰" * filled + "▱" * (width - filled)
 
-def fight_embed(challenger: discord.Member, opponent: discord.Member,
-                lv_a: int, lv_b: int, pct: int):
+def fight_embed(name_a: str, name_b: str, lv_a: int, lv_b: int, pct: int):
     em = discord.Embed(title="대결 중…", color=0xf1c40f)
-    em.add_field(name="도전자", value=f"{challenger.display_name} · +{lv_a}", inline=True)
-    em.add_field(name="상대",   value=f"{opponent.display_name} · +{lv_b}", inline=True)
+    em.add_field(name="도전자", value=f"{name_a} · +{lv_a}", inline=True)
+    em.add_field(name="상대",   value=f"{name_b} · +{lv_b}", inline=True)
     em.add_field(name="진행",   value=f"{progress_bar(pct/100)} **{pct}%**", inline=False)
     return em
 
-def result_embed(winner: discord.Member, loser: discord.Member,
-                 stake: int, bal_w: int, bal_l: int, lv_w: int, lv_l: int):
+def result_embed(winner, loser, stake: int, bal_w: int, bal_l: int, lv_w: int, lv_l: int):
     em = discord.Embed(title="맞짱 결과", color=0x2ecc71)
     em.add_field(name="승자", value=f"{winner.mention} · +{lv_w}", inline=True)
     em.add_field(name="패자", value=f"{loser.mention} · +{lv_l}", inline=True)
@@ -150,7 +158,7 @@ class DuelChallengeView(AutoCancelView):
         uid_b = self.opponent_id
         stake = self.stake
 
-        # 최종 잔액/레벨 확인 및 결과 판정 + 정산 (단일 트랜잭션으로)
+        # 최종 잔액/레벨 확인 및 결과 판정 + 정산 (단일 트랜잭션)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
             await ensure_weapon_row(db, gid, uid_a)
@@ -159,12 +167,15 @@ class DuelChallengeView(AutoCancelView):
             ub = await get_user(db, gid, uid_b)
             bal_a, bal_b = ua["balance"], ub["balance"]
 
-            # 여유 자금 재검증
+            # 잔액 재검증
             if bal_a < stake or bal_b < stake:
                 await db.execute("ROLLBACK")
                 for c in self.children: c.disabled = True
                 em = discord.Embed(title="맞짱 취소", description="한쪽 잔액이 부족해 대결이 취소되었습니다.", color=0xE67E22)
-                await self.message.edit(embed=em, view=None)
+                if self.message:
+                    await self.message.edit(embed=em, view=None)
+                else:
+                    await interaction.edit_original_response(embed=em, view=None)
                 return
 
             # 승패 판정
@@ -176,13 +187,15 @@ class DuelChallengeView(AutoCancelView):
             uid_w, uid_l = (uid_a, uid_b) if a_wins else (uid_b, uid_a)
             lv_w, lv_l   = (lv_a, lv_b) if a_wins else (lv_b, lv_a)
 
-            # 애니메이션(메시지 수정)
+            # 애니메이션(메시지 수정) — 캐시 미스 대비 이름 문자열 사용
+            name_a = member_label(interaction.guild, uid_a)
+            name_b = member_label(interaction.guild, uid_b)
             for t in range(0, 101, 20):
-                await self.message.edit(embed=fight_embed(
-                    interaction.guild.get_member(uid_a),
-                    interaction.guild.get_member(uid_b),
-                    lv_a, lv_b, t
-                ), view=None)
+                em = fight_embed(name_a, name_b, lv_a, lv_b, t)
+                if self.message:
+                    await self.message.edit(embed=em, view=None)
+                else:
+                    await interaction.edit_original_response(embed=em, view=None)
                 await asyncio.sleep(0.4)
 
             # 정산
@@ -191,10 +204,13 @@ class DuelChallengeView(AutoCancelView):
             cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid_l))
             row = await cur.fetchone(); bal_l = row[0]
 
-            if bal_w < 0 or bal_l < stake:
+            if bal_l < stake:
                 await db.execute("ROLLBACK")
                 em = discord.Embed(title="맞짱 취소", description="정산 중 조건 불일치로 취소되었습니다.", color=0xE67E22)
-                await self.message.edit(embed=em, view=None)
+                if self.message:
+                    await self.message.edit(embed=em, view=None)
+                else:
+                    await interaction.edit_original_response(embed=em, view=None)
                 return
 
             new_bal_w = bal_w + stake
@@ -206,15 +222,18 @@ class DuelChallengeView(AutoCancelView):
                                {"opponent": uid_l, "stake": stake, "p": p_a})
             await write_ledger(db, gid, uid_l, "duel_lose", -stake, new_bal_l,
                                {"opponent": uid_w, "stake": stake, "p": p_a})
-
             await db.commit()
 
-        # 결과 표시
-        winner = interaction.guild.get_member(uid_w)
-        loser  = interaction.guild.get_member(uid_l)
-        await self.message.edit(embed=result_embed(
-            winner, loser, stake, new_bal_w, new_bal_l, lv_w, lv_l
-        ), view=None)
+        # 결과 표시 — 안전한 멤버 객체 확보(없으면 스텁)
+        guild = interaction.guild
+        winner = ensure_member(guild, uid_w)
+        loser  = ensure_member(guild, uid_l)
+
+        em = result_embed(winner, loser, stake, new_bal_w, new_bal_l, lv_w, lv_l)
+        if self.message:
+            await self.message.edit(embed=em, view=None)
+        else:
+            await interaction.edit_original_response(embed=em, view=None)
 
     @discord.ui.button(label="거절", style=discord.ButtonStyle.danger, row=0)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -249,26 +268,23 @@ async def mz_duel(interaction: discord.Interaction, opponent: discord.Member, am
         lv_b = await get_level(db, gid, uid_b)
         await db.commit()
 
-    # 0=전액 → 둘 중 잔액이 적은 쪽 기준으로 통일
+    # 0=전액 → 둘 중 잔액이 적은 쪽을 기준으로 통일
     stake = min(bal_a, bal_b) if amount == 0 else amount
     if stake < min_bet:
         return await interaction.response.send_message(
             f"최소 베팅은 {won(min_bet)} 입니다. (입력: {won(stake)})", ephemeral=True
         )
     if stake > bal_a:
-        return await interaction.response.send_message(
-            f"도전자 잔액 부족: {won(bal_a)}", ephemeral=True
-        )
+        return await interaction.response.send_message(f"도전자 잔액 부족: {won(bal_a)}", ephemeral=True)
     if stake > bal_b:
-        return await interaction.response.send_message(
-            f"상대 잔액 부족: {won(bal_b)}", ephemeral=True
-        )
+        return await interaction.response.send_message(f"상대 잔액 부족: {won(bal_b)}", ephemeral=True)
 
     p_a = duel_win_prob(lv_a, lv_b)
     view = DuelChallengeView(gid, uid_a, uid_b, stake, lv_a, lv_b, p_a)
-    await interaction.response.send_message(embed=challenge_embed(
-        interaction.user, opponent, stake, lv_a, lv_b, p_a
-    ), view=view)
+    await interaction.response.send_message(
+        embed=challenge_embed(interaction.user, opponent, stake, lv_a, lv_b, p_a),
+        view=view
+    )
     view.message = await interaction.original_response()
 
 async def setup(bot: discord.Client):
