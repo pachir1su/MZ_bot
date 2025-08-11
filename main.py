@@ -42,6 +42,8 @@ class MZTranslator(app_commands.Translator):
                     "mz_enhance":      "면진강화",
                     "mz_duel":         "면진맞짱",
                     "mz_help":         "면진도움말",
+                    "mz_ping":         "면진핑",
+                    "mz_profile":      "면진프로필",
                 }
                 return mapping.get(data.name)
 
@@ -65,17 +67,19 @@ class MZTranslator(app_commands.Translator):
                     "mz_enhance":      "무기 강화(+30). +10까지는 쉽게, 이후 난이도 상승",
                     "mz_duel":         "맞짱: 무기 등급+랜덤으로 승부, 동일 금액 베팅(0=전액)",
                     "mz_help":         "면진이 명령어 도움말",
+                    "mz_ping":         "봇의 핑 확인",
+                    "mz_profile":      "보유 금액, 서버 등수, 무기, 맞짱 전적 등 프로필",
                 }
                 return desc_map.get(data.name)
 
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
-                if data.name == "amount":   return "정수 금액(0=전액 / 최소 베팅 정책 준수)"
-                if data.name == "symbol":   return "종목(주식)/코인(가상 자산)"
-                if data.name == "question": return "질문 내용"
-                if data.name == "member":   return "받는 사람 선택"
-                if data.name == "opponent": return "상대 멤버"
-                if data.name == "user":     return "대상 사용자"
+                if data.name == "amount":    return "정수 금액(0=전액 / 최소 베팅 정책 준수)"
+                if data.name == "symbol":    return "종목(주식)/코인(가상 자산)"
+                if data.name == "question":  return "질문 내용"
+                if data.name == "member":    return "받는 사람 선택"
+                if data.name == "opponent":  return "상대 멤버"
+                if data.name == "user":      return "대상 사용자"
         return None
 
 # ───────── 기본 설정/봇 생성 ─────────
@@ -87,13 +91,32 @@ INTENTS = discord.Intents.default()
 INTENTS.message_content = False
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
-# ───────── DB 초기화 ─────────
+# ───────── DB 초기화/마이그 ─────────
 async def init_db():
     if not os.path.exists("models.sql"):
         return
     async with aiosqlite.connect(DB_PATH) as db:
         with open("models.sql", "r", encoding="utf-8") as f:
             await db.executescript(f.read())
+        await db.commit()
+
+async def migrate_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys=ON;")
+        # guild_settings 확장 컬럼
+        cur = await db.execute("PRAGMA table_info(guild_settings)")
+        cols = {r[1] for r in await cur.fetchall()}
+        alters = []
+        if "enh_cost_mult" not in cols:
+            alters.append("ALTER TABLE guild_settings ADD COLUMN enh_cost_mult REAL NOT NULL DEFAULT 1.0;")
+        if "force_mode" not in cols:
+            alters.append("ALTER TABLE guild_settings ADD COLUMN force_mode TEXT NOT NULL DEFAULT 'off';")
+        if "force_target_user_id" not in cols:
+            alters.append("ALTER TABLE guild_settings ADD COLUMN force_target_user_id INTEGER NOT NULL DEFAULT 0;")
+        for sql in alters:
+            await db.execute(sql)
+        # ledger 인덱스(있으면 건너뜀)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger(guild_id, user_id, kind, ts);")
         await db.commit()
 
 # ───────── 이벤트/셋업 ─────────
@@ -103,6 +126,7 @@ async def on_ready():
 
 async def setup_hook():
     await init_db()
+    await migrate_db()
 
     # 코그 로드
     await bot.load_extension("cogs.economy")
@@ -121,6 +145,8 @@ async def setup_hook():
     await bot.load_extension("cogs.enhance")   # 강화
     await bot.load_extension("cogs.duel")      # 맞짱(PvP)
     await bot.load_extension("cogs.help")      # 도움말
+    await bot.load_extension("cogs.ping")      # 핑
+    await bot.load_extension("cogs.profile")   # 프로필
 
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
@@ -133,7 +159,6 @@ async def setup_hook():
             bot.tree.copy_global_to(guild=gobj)
             synced = await bot.tree.sync(guild=gobj)
             print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
-
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
         print("[sync] cleared global commands")
