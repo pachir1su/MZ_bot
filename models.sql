@@ -18,21 +18,25 @@ CREATE TABLE IF NOT EXISTS ledger (
   kind          TEXT    NOT NULL,
   amount        INTEGER NOT NULL,
   balance_after INTEGER NOT NULL,
-  meta          TEXT,
+  meta          TEXT    NOT NULL,
   ts            INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_gut ON ledger(guild_id, user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger(guild_id, user_id, kind, ts);
 
 -- 길드 설정
 CREATE TABLE IF NOT EXISTS guild_settings (
-  guild_id     INTEGER PRIMARY KEY,
-  min_bet      INTEGER NOT NULL DEFAULT 1000,
-  win_min_bps  INTEGER NOT NULL DEFAULT 3000, -- 30.00%
-  win_max_bps  INTEGER NOT NULL DEFAULT 6000, -- 60.00%
-  mode_name    TEXT    NOT NULL DEFAULT '일반 모드'
+  guild_id             INTEGER PRIMARY KEY,
+  min_bet              INTEGER NOT NULL DEFAULT 1000,
+  win_min_bps          INTEGER NOT NULL DEFAULT 3000, -- 30.00%
+  win_max_bps          INTEGER NOT NULL DEFAULT 6000, -- 60.00%
+  mode_name            TEXT    NOT NULL DEFAULT '일반 모드',
+  enh_cost_mult        REAL    NOT NULL DEFAULT 1.0,  -- 강화 비용 배율
+  force_mode           TEXT    NOT NULL DEFAULT 'off',-- off/success/fail
+  force_target_user_id INTEGER NOT NULL DEFAULT 0     -- 0=전체, 그 외=user_id
 );
 
--- 마켓 아이템(주식/코인) — 관리자 편집 대상
+-- 마켓 아이템(주식/코인)
 CREATE TABLE IF NOT EXISTS market_items (
   guild_id  INTEGER NOT NULL,
   type      TEXT    NOT NULL,    -- 'stock' | 'coin'
@@ -43,11 +47,11 @@ CREATE TABLE IF NOT EXISTS market_items (
   PRIMARY KEY (guild_id, type, name)
 );
 
--- [NEW] 무기/강화 상태 저장
+-- 무기/강화 상태
 CREATE TABLE IF NOT EXISTS user_weapons (
   guild_id   INTEGER NOT NULL,
   user_id    INTEGER NOT NULL,
-  level      INTEGER NOT NULL DEFAULT 0,  -- +0 ~ +10
+  level      INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (guild_id, user_id)
 );
