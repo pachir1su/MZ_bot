@@ -1,4 +1,3 @@
-# cogs/help.py
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -17,7 +16,8 @@ class HelpCog(commands.Cog):
                 "• **/면진돈줘** — 10분마다 1,000 코인\n"
                 "• **/면진출첵** — 자정 초기화 출석 보상\n"
                 "• **/면진잔액** — 잔액 확인 / 대상 선택 가능\n"
-                "• **/면진송금** — 멤버에게 코인 송금"
+                "• **/면진송금** — 멤버에게 코인 송금\n"
+                "• **/면진프로필** — 보유 금액, 서버 등수, 무기, 맞짱 전적"
             ),
             inline=False
         )
@@ -27,7 +27,8 @@ class HelpCog(commands.Cog):
             value=(
                 "• **/면진도박** — 승률 30~60%, 결과는 ±베팅액\n"
                 "• **/면진주식** — 3초 후 결과, 0=전액\n"
-                "• **/면진코인** — 3초 후 결과, 0=전액"
+                "• **/면진코인** — 3초 후 결과, 0=전액\n"
+                "• **/면진파산** — 부채 복구 시도"
             ),
             inline=False
         )
@@ -35,20 +36,22 @@ class HelpCog(commands.Cog):
         em.add_field(
             name="강화/전투",
             value=(
-                "• **/면진강화** — 무기 강화 **+30**(1분 무응답 자동 취소). "
-                "**+10까지 쉬움**, 이후 난이도 상승\n"
-                "• **/면진맞짱** — 강화 무기로 PvP(차기 단계)"
+                "• **/면진강화** — 무기 강화 **+30**(1분 무응답 자동 취소)\n"
+                "• **/면진맞짱** — 강화 무기로 PvP"
             ),
             inline=False
         )
 
         em.add_field(
-            name="관리자",
-            value="• **/면진관리자** — 설정/잔액/쿨타임/마켓 편집(관리자 전용)",
+            name="유틸/관리",
+            value=(
+                "• **/면진핑** — 봇의 핑 확인\n"
+                "• **/면진관리자** — 설정/잔액/쿨타임/마켓/강화설정/결과강제"
+            ),
             inline=False
         )
 
-        await interaction.response.send_message(embed=em, ephemeral=True)
+        await interaction.response.send_message(embed=em, ephemeral=False)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(HelpCog(bot))
