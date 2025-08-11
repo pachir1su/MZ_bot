@@ -47,21 +47,38 @@ async def get_min_bet(gid: int) -> int:
 
 # ===== 승률 모델 =====
 def duel_win_prob(att_lv: int, def_lv: int) -> float:
-    """레벨 차이 1단계당 약 1.5% 유리(10~90% 클램프)."""
-    p = 0.5 + 0.015 * (att_lv - def_lv)
-    return max(0.10, min(0.90, p))
+    """
+    무기 레벨 영향 강화: 레벨 차이 1당 3.0% 가중.
+    승/패 확률은 5%~95%로 클램프.
+    """
+    p = 0.5 + 0.03 * (att_lv - def_lv)
+    return max(0.05, min(0.95, p))
 
-# ===== 안전한 멤버 스텁/라벨 =====
-class _StubMember:
-    def __init__(self, uid: int):
+# ===== 안전한 멤버/유저 해석 =====
+class _UserStub:
+    def __init__(self, uid: int, display_name: str):
         self.id = uid
         self.mention = f"<@{uid}>"
-        self.display_name = f"유저 {uid}"
+        self.display_name = display_name
 
-def ensure_member(guild: discord.Guild, uid: int):
-    return guild.get_member(uid) or _StubMember(uid)
+async def resolve_userish(guild: discord.Guild, bot: discord.Client, uid: int):
+    """
+    1) 길드 캐시(Member.display_name)
+    2) HTTP: bot.fetch_user(uid) → global_name or name
+    3) 폴백: '유저 {uid}'
+    위 우선순위로 'mention'과 'display_name'을 가진 객체를 돌려준다.
+    """
+    m = guild.get_member(uid)
+    if m:
+        return m
+    try:
+        u = await bot.fetch_user(uid)
+        dn = getattr(u, "global_name", None) or u.name or f"유저 {uid}"
+        return _UserStub(uid, dn)
+    except Exception:
+        return _UserStub(uid, f"유저 {uid}")
 
-def member_label(guild: discord.Guild, uid: int) -> str:
+def member_label_cached(guild: discord.Guild, uid: int) -> str:
     m = guild.get_member(uid)
     return m.display_name if m else f"유저 {uid}"
 
@@ -73,10 +90,9 @@ class AutoCancelView(discord.ui.View):
         self.message: Optional[discord.Message] = None
         self.owner_id: Optional[int] = None
         self._timeout_seconds = timeout_seconds
-        self.finalized: bool = False  # ✅ 결과 확정 시 타이머 중단 플래그
+        self.finalized: bool = False  # 결과 확정 시 True
 
     async def on_timeout(self):
-        # ✅ 이미 종료된 상태면 아무것도 하지 않음
         if self.finalized:
             return
         try:
@@ -162,6 +178,8 @@ class DuelChallengeView(AutoCancelView):
         uid_b = self.opponent_id
         stake = self.stake
 
+        new_bal_w = new_bal_l = 0  # 후단 사용을 위해 미리 선언
+
         # 최종 잔액/레벨 확인 및 결과 판정 + 정산 (단일 트랜잭션)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -180,8 +198,8 @@ class DuelChallengeView(AutoCancelView):
                     await self.message.edit(embed=em, view=None)
                 else:
                     await interaction.edit_original_response(embed=em, view=None)
-                self.finalized = True  # ✅ 결과 확정
-                self.stop()            # ✅ 타이머 중단
+                self.finalized = True
+                self.stop()
                 return
 
             # 승패 판정
@@ -193,9 +211,16 @@ class DuelChallengeView(AutoCancelView):
             uid_w, uid_l = (uid_a, uid_b) if a_wins else (uid_b, uid_a)
             lv_w, lv_l   = (lv_a, lv_b) if a_wins else (lv_b, lv_a)
 
-            # 애니메이션(메시지 수정) — 캐시 미스 대비 이름 문자열 사용
-            name_a = member_label(interaction.guild, uid_a)
-            name_b = member_label(interaction.guild, uid_b)
+            # 애니메이션(메시지 수정) — 이름 확보(HTTP 폴백)
+            name_a = member_label_cached(interaction.guild, uid_a)
+            name_b = member_label_cached(interaction.guild, uid_b)
+            if "유저 " in name_a or "유저 " in name_b:
+                # 캐시가 비어 있으면 한 번만 HTTP 조회
+                ua_name = await resolve_userish(interaction.guild, interaction.client, uid_a)
+                ub_name = await resolve_userish(interaction.guild, interaction.client, uid_b)
+                name_a = ua_name.display_name
+                name_b = ub_name.display_name
+
             for t in range(0, 101, 20):
                 em = fight_embed(name_a, name_b, lv_a, lv_b, t)
                 if self.message:
@@ -232,18 +257,18 @@ class DuelChallengeView(AutoCancelView):
                                {"opponent": uid_w, "stake": stake, "p": p_a})
             await db.commit()
 
-        # 결과 표시 — 안전한 멤버 객체 확보(없으면 스텁)
+        # 결과 표시 — 안전한 멤버/유저 확보(HTTP 폴백)
         guild = interaction.guild
-        winner = ensure_member(guild, uid_w)
-        loser  = ensure_member(guild, uid_l)
+        winner = await resolve_userish(guild, interaction.client, uid_w)
+        loser  = await resolve_userish(guild, interaction.client, uid_l)
 
         em = result_embed(winner, loser, stake, new_bal_w, new_bal_l, lv_w, lv_l)
         if self.message:
             await self.message.edit(embed=em, view=None)
         else:
             await interaction.edit_original_response(embed=em, view=None)
-        self.finalized = True   # ✅ 결과 확정
-        self.stop()             # ✅ 타이머 중단
+        self.finalized = True
+        self.stop()
 
     @discord.ui.button(label="거절", style=discord.ButtonStyle.danger, row=0)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -253,8 +278,8 @@ class DuelChallengeView(AutoCancelView):
         await interaction.response.edit_message(embed=discord.Embed(
             title="맞짱 거절됨", description=f"{interaction.user.mention} 님이 대결을 거절했습니다.", color=0x95a5a6
         ), view=None)
-        self.finalized = True   # ✅ 결과 확정
-        self.stop()             # ✅ 타이머 중단
+        self.finalized = True
+        self.stop()
 
 # ===== /면진맞짱 =====
 @app_commands.command(name="mz_duel", description="맞짱: 상대와 동일 금액을 베팅해 승부(0=전액)")
