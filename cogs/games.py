@@ -1,43 +1,36 @@
-import aiosqlite, secrets, json, time, asyncio
+import aiosqlite, secrets, json, time, asyncio, random
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
 DB_PATH = "economy.db"
 
-# 애니메이션/지연
 REVEAL_DELAY = 3
 PROGRESS_TICKS = 6
 SPINNER = ["◐","◓","◑","◒","◐","◓"]
 
-# ── 표시/시간 유틸 ───────────────────────────────────────
 KST = timezone(timedelta(hours=9))
 def now_kst() -> datetime: return datetime.now(KST)
 def won(n: int) -> str: return f"{n:,}₩"
-def footer_text(balance: int | None, mode_name: str) -> str:
-    t = now_kst().strftime("%H:%M")
-    if balance is None:
-        return f"현재 모드 : {mode_name} · 오늘 {t}"
-    return f"현재 잔액 : {won(balance)} · 현재 모드 : {mode_name} · 오늘 {t}"
 
 def progress_bar(p: float, width: int = 12) -> str:
     p = max(0.0, min(1.0, p))
     filled = int(round(p * width))
     return "▰" * filled + "▱" * (width - filled)
 
-# ── 설정/DB 유틸 ─────────────────────────────────────────
 async def get_settings(gid: int):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT min_bet, win_min_bps, win_max_bps, mode_name FROM guild_settings WHERE guild_id=?",
+            "SELECT min_bet, win_min_bps, win_max_bps, mode_name, COALESCE(force_mode,'off'), COALESCE(force_target_user_id,0) "
+            "FROM guild_settings WHERE guild_id=?",
             (gid,)
         )
         row = await cur.fetchone()
         if row:
-            return {"min_bet": row[0], "win_min_bps": row[1], "win_max_bps": row[2], "mode_name": row[3]}
+            return {"min_bet": row[0], "win_min_bps": row[1], "win_max_bps": row[2], "mode_name": row[3], "force_mode": row[4], "force_uid": int(row[5] or 0)}
         await db.execute("INSERT OR IGNORE INTO guild_settings(guild_id) VALUES(?)", (gid,))
         await db.commit()
-    return {"min_bet": 1000, "win_min_bps": 3000, "win_max_bps": 6000, "mode_name": "일반 모드"}
+        return {"min_bet": 1000, "win_min_bps": 3000, "win_max_bps": 6000, "mode_name": "일반 모드", "force_mode":"off", "force_uid":0}
 
 async def get_user(db, gid: int, uid: int):
     cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid))
@@ -54,7 +47,9 @@ async def write_ledger(db, gid, uid, kind, amount, bal_after, meta=None):
         (gid, uid, kind, amount, bal_after, json.dumps(meta or {}), int(time.time()))
     )
 
-# ── 주문 접수 임베드 ─────────────────────────────────────
+def footer_text(bal: int, mode_name: str) -> str:
+    return f"현재 잔액 {won(bal)} · 모드 {mode_name} · {now_kst().strftime('%H:%M')}"
+
 async def send_order_embed(interaction: discord.Interaction, amount: int, all_in: bool, mode_name: str):
     em = discord.Embed(title="주문 접수 — 도박", color=0x95a5a6)
     try:
@@ -76,44 +71,34 @@ async def mz_bet(interaction: discord.Interaction, amount: int, all_in: bool = F
     min_bet = int(s["min_bet"])
     p_lo = int(s["win_min_bps"])
     p_hi = int(s["win_max_bps"])
+    force_mode, force_uid = s["force_mode"], s["force_uid"]
 
     # 잔액/금액 검증
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
         bal = u["balance"]
-        if all_in:
-            amount = bal
-
-        if bal <= 0 or amount <= 0 or amount > bal:
+        if amount <= 0:
             await db.execute("ROLLBACK")
-            em = discord.Embed(title="주문 거절 — 잔액/금액 오류", color=0xe74c3c)
-            em.add_field(name="현재 잔액", value=won(bal), inline=True)
-            em.add_field(name="요청 베팅", value=won(amount), inline=True)
-            return await interaction.response.send_message(embed=em)
-
+            return await interaction.response.send_message("베팅 금액은 1원 이상이어야 합니다. (전액은 all_in을 사용)", ephemeral=False)
         if amount < min_bet:
             await db.execute("ROLLBACK")
-            em = discord.Embed(title="주문 거절 — 최소 베팅 미만", color=0xf1c40f)
-            em.add_field(name="최소 베팅", value=won(min_bet))
-            em.add_field(name="요청 베팅", value=won(amount))
-            return await interaction.response.send_message(embed=em)
+            return await interaction.response.send_message(f"최소 베팅은 {won(min_bet)} 입니다.", ephemeral=False)
+        if amount > bal:
+            await db.execute("ROLLBACK")
+            return await interaction.response.send_message(f"잔액 부족: {won(bal)}", ephemeral=False)
+        # 선차감
+        new_bal = bal - amount
+        await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
+        await write_ledger(db, gid, uid, "bet_place", -amount, new_bal, {"amount": amount})
+        await db.commit()
 
-    # 주문 접수(초기 메시지)
+    # 애니메이션
     await send_order_embed(interaction, amount, all_in, s["mode_name"])
-
-    # 결과 미리 결정(승/패) — DB 반영은 나중에
-    if p_hi < p_lo:
-        p_lo, p_hi = p_hi, p_lo
-    p = secrets.randbelow((p_hi - p_lo + 1)) + p_lo  # [p_lo, p_hi]
-    win = secrets.randbelow(10_000) < p
-    delta = amount if win else -amount
-
-    # 스피너 애니메이션
-    for i, ch in enumerate(SPINNER, start=1):
-        prog = i / len(SPINNER)
+    for i, ch in enumerate(SPINNER):
+        prog = (i + 1) / len(SPINNER)
         pbar = progress_bar(prog)
-        em = discord.Embed(title=f"도박 진행 중 {ch}", color=0xF1C40F)
+        em = discord.Embed(title="도박 진행 중…", color=0xF1C40F)
         try:
             em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         except Exception:
@@ -124,7 +109,16 @@ async def mz_bet(interaction: discord.Interaction, amount: int, all_in: bool = F
         await interaction.edit_original_response(embed=em)
         await asyncio.sleep(REVEAL_DELAY / len(SPINNER))
 
-    # 반영
+    # 결과
+    if force_mode in ("success","fail") and (force_uid == 0 or force_uid == uid):
+        win = (force_mode == "success")
+        p = random.randint(p_lo, p_hi)
+    else:
+        p = secrets.randbelow(p_hi - p_lo + 1) + p_lo
+        win = (secrets.randbelow(10000) < p * 100)
+
+    delta = amount if win else -amount
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         u = await get_user(db, gid, uid)
@@ -133,13 +127,10 @@ async def mz_bet(interaction: discord.Interaction, amount: int, all_in: bool = F
         await write_ledger(db, gid, uid, "bet_win" if win else "bet_lose", delta, new_bal, {"amount": amount, "win_prob_bps": p})
         await db.commit()
 
-    # 결과 임베드(같은 메시지로 확정)
     color = 0x2ecc71 if win else 0xe74c3c
     em = discord.Embed(title="도박 결과", color=color)
-    try:
-        em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-    except Exception:
-        em.set_author(name=interaction.user.display_name)
+    try: em.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    except Exception: em.set_author(name=interaction.user.display_name)
     em.add_field(name="결과", value=("승리" if win else "패배"), inline=True)
     em.add_field(name="손익", value=f"{'+' if delta>=0 else ''}{won(delta)}", inline=True)
     em.add_field(name="현재 잔액", value=won(new_bal), inline=False)
@@ -149,6 +140,5 @@ async def mz_bet(interaction: discord.Interaction, amount: int, all_in: bool = F
     except discord.NotFound:
         await interaction.followup.send(embed=em)
 
-# ── 코그 등록 ────────────────────────────────────────────
 async def setup(bot: discord.Client):
     bot.tree.add_command(mz_bet)
