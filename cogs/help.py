@@ -1,30 +1,54 @@
 # cogs/help.py
 import discord
 from discord import app_commands
-from datetime import datetime, timezone, timedelta
+from discord.ext import commands
 
-KST = timezone(timedelta(hours=9))
-def now_kst_str(): return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+class HelpCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
 
-HELP_LINES = [
-    ("빠른 시작", "`/면진돈줘`, `/면진출첵`, `/면진잔액`"),
-    ("주식", "“작은 변동이 많고 안정적. 큰 변동은 드물다.”\n재구식품(가장 안정) · 대이식스(안정) · 성현전자(중간) · 배달의 승기(변동 큼)"),
-    ("코인", "“고수익·고변동. 가끔 큰 급등/급락, 원금 이상을 잃을 수 있음.”\n건영(중간 변동) · 면진(높은 변동) · 승철(매우 높은 변동)"),
-    ("파산", "“잔액이 음수일 때 10분마다 신청 가능.”"),
-    ("AI/게임", "`/면진타로`(3장 풀이, 공개), `/면진지니 질문:<텍스트>`(짧은 답)"),
-    ("동기화 팁", "“Ctrl+R로 새로고침.”"),
-]
+    @app_commands.command(name="mz_help", description="면진이 명령어 도움말")
+    async def mz_help(self, interaction: discord.Interaction):
+        em = discord.Embed(title="면진이 — 도움말", color=0x3498db)
 
-@app_commands.command(name="mz_help", description="면진이 사용법과 주식/코인 가이드")
-async def mz_help(interaction: discord.Interaction):
-    em = discord.Embed(title="면진도움말", color=0x5865F2)
-    for name, val in HELP_LINES:
-        em.add_field(name=name, value=val, inline=False)
-    if interaction.guild and interaction.guild.icon:
-        try: em.set_thumbnail(url=interaction.guild.icon.url)
-        except Exception: pass
-    em.set_footer(text=f"{interaction.guild.name if interaction.guild else '면진이'} · {now_kst_str()}")
-    await interaction.response.send_message(embed=em)  # 항상 공개
+        em.add_field(
+            name="기본",
+            value=(
+                "• **/면진돈줘** — 10분마다 1,000 코인\n"
+                "• **/면진출첵** — 자정 초기화 출석 보상\n"
+                "• **/면진잔액** — 잔액 확인 / 대상 선택 가능\n"
+                "• **/면진송금** — 멤버에게 코인 송금"
+            ),
+            inline=False
+        )
 
-async def setup(bot: discord.Client):
-    bot.tree.add_command(mz_help)
+        em.add_field(
+            name="투자/게임",
+            value=(
+                "• **/면진도박** — 승률 30~60%, 결과는 ±베팅액\n"
+                "• **/면진주식** — 3초 후 결과, 0=전액\n"
+                "• **/면진코인** — 3초 후 결과, 0=전액"
+            ),
+            inline=False
+        )
+
+        em.add_field(
+            name="강화/전투",
+            value=(
+                "• **/면진강화** — 무기 강화 **+30**(1분 무응답 자동 취소). "
+                "**+10까지 쉬움**, 이후 난이도 상승\n"
+                "• **/면진맞짱** — 강화 무기로 PvP(차기 단계)"
+            ),
+            inline=False
+        )
+
+        em.add_field(
+            name="관리자",
+            value="• **/면진관리자** — 설정/잔액/쿨타임/마켓 편집(관리자 전용)",
+            inline=False
+        )
+
+        await interaction.response.send_message(embed=em, ephemeral=True)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(HelpCog(bot))
