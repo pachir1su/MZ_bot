@@ -176,6 +176,27 @@ class DuelChallengeView(AutoCancelView):
             lv_a = await get_level(db, gid, uid_a)
             lv_b = await get_level(db, gid, uid_b)
             p_a = duel_win_prob(lv_a, lv_b)
+
+            # 5%: 면진파파 난입 → 양측 모두 베팅액만큼 손실
+            if secrets.randbelow(100) < 10:
+                # 현재 잔액 조회
+                cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid_a))
+                bal_a2 = (await cur.fetchone())[0]
+                cur = await db.execute("SELECT balance FROM users WHERE guild_id=? AND user_id=?", (gid, uid_b))
+                bal_b2 = (await cur.fetchone())[0]
+                new_a2 = bal_a2 - stake
+                new_b2 = bal_b2 - stake
+                await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_a2, gid, uid_a))
+                await db.execute("UPDATE users SET balance=? WHERE guild_id=? AND user_id=?", (new_b2, gid, uid_b))
+                await write_ledger(db, gid, uid_a, "duel_papa", -stake, new_a2, {"opponent": uid_b, "stake": stake})
+                await write_ledger(db, gid, uid_b, "duel_papa", -stake, new_b2, {"opponent": uid_a, "stake": stake})
+                await db.commit()
+
+                em = discord.Embed(title="면진파파 강림!", color=0xe74c3c,
+                                   description=f"아저씨가 예전에 성격이 더러워서 엄청 잘 나갔었어! 두 플레이어 모두 {won(stake)}를 잃었습니다.")
+                if self.message: await self.message.edit(embed=em, view=None)
+                else: await interaction.edit_original_response(embed=em, view=None)
+                self.finalized = True; self.stop(); return
             roll = secrets.randbelow(10_000) / 10_000.0
             a_wins = (roll < p_a)
             uid_w, uid_l = (uid_a, uid_b) if a_wins else (uid_b, uid_a)
