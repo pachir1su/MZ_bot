@@ -193,12 +193,17 @@ async def mz_rank(interaction: discord.Interaction):
         )
         rows = await cur.fetchall()
 
-    embed = discord.Embed(title="서버 게임 잔액 순위", color=0x2ecc71 if rows else 0x95a5a6)
+    embed = discord.Embed(title="서버 순위", color=0x2ecc71 if rows else 0x95a5a6)
     if not rows:
         embed.description = "데이터가 없습니다."
     else:
         lines = []
         for i, (uid, bal) in enumerate(rows, start=1):
+            # 강화 레벨 조회
+            async with aiosqlite.connect(DB_PATH) as _db_lv:
+                cur_lv = await _db_lv.execute("SELECT level FROM user_weapons WHERE guild_id=? AND user_id=?", (gid, uid))
+                r_lv = await cur_lv.fetchone()
+                lv = (r_lv[0] if r_lv else 0)
             m = interaction.guild.get_member(uid)
             if m:
                 name = m.display_name
@@ -208,7 +213,7 @@ async def mz_rank(interaction: discord.Interaction):
                     name = u.global_name or u.name
                 except Exception:
                     name = f"유저 {uid}"
-            lines.append(f"{i}. {name}\n{won(bal)}")
+            lines.append(f"{i}. {name}  **+{lv}**\n{won(bal)}")
         embed.description = "\n".join(lines)
         if interaction.guild.icon:
             try:
