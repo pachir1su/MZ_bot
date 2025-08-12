@@ -744,7 +744,7 @@ class ForceView(discord.ui.View):
             s = await get_settings(db, self.gid)
         txt = "해제" if mode=="off" else ("항상 성공" if mode=="success" else "항상 실패")
         who = "전체" if target==0 else await safe_name(interaction.guild, target)
-        em = settings_embed(s); em.title = f"결과 강제 설정: {txt} · 대상 {who}"
+        em = force_main_embed(s); em.title = f"결과 강제 설정: {txt} · 대상 {who}"
         await interaction.response.edit_message(embed=em, view=self)
     @discord.ui.button(label="항상 성공", style=discord.ButtonStyle.success, row=1)
     async def force_success(self, i, _): await self._set(i, "success")
@@ -763,6 +763,24 @@ def admin_main_embed() -> discord.Embed:
     em.description = "원하는 카테고리를 선택하세요."
     return em
 
+# ───────── 서브메뉴 인트로 임베드 ─────────
+def balance_main_embed() -> discord.Embed:
+    return discord.Embed(title="잔액 관리", description="대상 선택 후 잔액 설정/증가/감소를 선택하세요.", color=0x1abc9c)
+
+def cooldown_main_embed() -> discord.Embed:
+    return discord.Embed(title="쿨타임 관리", description="대상 선택 후 돈줘/출첵 쿨타임을 초기화하세요.", color=0x9b59b6)
+
+def enhance_main_embed() -> discord.Embed:
+    return discord.Embed(title="강화 설정", description="강화 비용 배율 등을 변경할 수 있습니다.", color=0xe67e22)
+
+def force_main_embed(s: dict) -> discord.Embed:
+    mode = s.get("force_mode", "off"); tgt = s.get("force_uid", 0)
+    who = "전체" if not tgt else f"user_id={tgt}"
+    em = discord.Embed(title="결과 강제", color=0xe74c3c)
+    em.add_field(name="현재 설정", value=f"mode={mode}, 대상={who}", inline=False)
+    return em
+
+
 class AdminMainView(discord.ui.View):
     def __init__(self, gid: int):
         super().__init__(timeout=300)
@@ -778,11 +796,11 @@ class AdminMainView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         async with aiosqlite.connect(DB_PATH) as db:
             s = await get_settings(db, self.gid)
-        await interaction.edit_original_response(embed=settings_embed(s), view=BalanceView(self.gid), content=None)
+        await interaction.edit_original_response(embed=balance_main_embed(), view=BalanceView(self.gid), content=None)
     @discord.ui.button(label="쿨타임", style=discord.ButtonStyle.secondary, row=0)
     async def to_cooldown(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
-        await interaction.edit_original_response(content="쿨타임 메뉴", embed=None, view=CooldownView(self.gid))
+        await interaction.edit_original_response(embed=cooldown_main_embed(), view=CooldownView(self.gid), content=None)
     @discord.ui.button(label="도구", style=discord.ButtonStyle.secondary, row=0)
     async def to_tools(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
@@ -800,13 +818,13 @@ class AdminMainView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         async with aiosqlite.connect(DB_PATH) as db:
             s = await get_settings(db, self.gid)
-        await interaction.edit_original_response(embed=settings_embed(s), view=EnhanceSettingsView(self.gid), content=None)
+        await interaction.edit_original_response(embed=enhance_main_embed(), view=EnhanceSettingsView(self.gid), content=None)
     @discord.ui.button(label="결과 강제", style=discord.ButtonStyle.danger, row=1)
     async def to_force(self, interaction, _):
         await interaction.response.defer(ephemeral=True)
         async with aiosqlite.connect(DB_PATH) as db:
             s = await get_settings(db, self.gid)
-        await interaction.edit_original_response(embed=settings_embed(s), view=ForceView(self.gid), content=None)
+        await interaction.edit_original_response(embed=force_main_embed(s), view=ForceView(self.gid), content=None)
 
 # ───────── 슬래시 명령 ─────────
 @app_commands.command(name="mz_admin", description="Open admin menu (owner only)")
