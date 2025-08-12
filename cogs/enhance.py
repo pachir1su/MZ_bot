@@ -132,6 +132,21 @@ def enhance_embed(user: discord.Member, gid: int, curr_lv: int, bal: int):
     em.set_footer(text=f"오늘 {now_kst().strftime('%H:%M')}")
     return em
 
+
+async def enhance_embed_effective(user: discord.Member, gid: int, curr_lv: int, bal: int) -> discord.Embed:
+    em = enhance_embed(user, gid, curr_lv, bal)
+    # 배율 적용 비용 표시 추가
+    if curr_lv < MAX_LV:
+        try:
+            row, nxt = next_row(curr_lv)
+            mult = await get_enh_cost_mult(gid)
+            eff = int(round(row["cost"] * float(mult)))
+            em.add_field(name=f"강화비용(배율적용 x{mult:.2f})", value=won(eff), inline=True)
+        except Exception:
+            pass
+    return em
+
+
 # ───────── UI View(자동 취소) ─────────
 class AutoCancelView(discord.ui.View):
     def __init__(self, timeout_seconds: int = 60):
@@ -153,6 +168,20 @@ class AutoCancelView(discord.ui.View):
             pass
 
 # ───────── 강화 View ─────────
+
+# 결과 표시 후 일정 시간이 지나면 버튼을 제거하는 View
+class ResultAutoRemoveView(discord.ui.View):
+    def __init__(self, *, timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.message: Optional[discord.Message] = None
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
+
 class EnhanceView(AutoCancelView):
     def __init__(self, gid: int, uid: int, curr_lv: int, bal: int):
         super().__init__(timeout_seconds=60)
@@ -182,7 +211,7 @@ class EnhanceView(AutoCancelView):
             await db.commit()
         self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
         if self.message:
-            await self.message.edit(embed=enhance_embed(interaction.user, self.gid, self.curr_lv, self.bal), view=self)
+            await self.message.edit(embed=(await enhance_embed_effective(interaction.user, self.gid, self.curr_lv, self.bal)), view=self)
 
     async def _do_cancel(self, interaction: discord.Interaction):
         self.finalized = True
@@ -192,6 +221,10 @@ class EnhanceView(AutoCancelView):
 
     async def _do_enhance(self, interaction: discord.Interaction):
         if self.curr_lv >= MAX_LV:
+        # 애니메이션 동안 버튼 비활성화
+            for c in self.children:
+                if hasattr(c, 'disabled'):
+                    c.disabled = True
             return await interaction.response.send_message("이미 최대 레벨입니다.", ephemeral=True)
 
         row, nxt = next_row(self.curr_lv)
@@ -257,12 +290,16 @@ class EnhanceView(AutoCancelView):
             "break":   "강화 **실패**(무기 **파괴**) → LV0",
         }[outcome]
 
-        em = enhance_embed(interaction.user, self.gid, self.curr_lv, self.bal)
+        em = (await enhance_embed_effective(interaction.user, self.gid, self.curr_lv, self.bal))
         em.insert_field_at(0, name="결과", value=result_txt, inline=False)
         self.btn_enh.disabled = (self.curr_lv >= MAX_LV)
         self.finalized = True
-        if self.message: await self.message.edit(embed=em, view=self)
-        else: await interaction.edit_original_response(embed=em, view=self)
+        view = ResultAutoRemoveView(timeout=300)
+        if self.message:
+            msg = await self.message.edit(embed=em, view=view)
+        else:
+            msg = await interaction.edit_original_response(embed=em, view=view)
+        view.message = msg
 
 # ───────── Slash 명령 ─────────
 @app_commands.command(name="mz_enhance", description="무기 강화 메뉴를 엽니다")
@@ -280,7 +317,7 @@ async def mz_enhance(interaction: discord.Interaction):
         await db.commit()
 
     view = EnhanceView(gid, uid, lv, bal)
-    await interaction.response.send_message(embed=enhance_embed(interaction.user, gid, lv, bal), view=view)
+    await interaction.response.send_message(embed=(await enhance_embed_effective(interaction.user, gid, lv, bal)), view=view)
     view.message = await interaction.original_response()
 
 async def setup(bot: discord.Client):
