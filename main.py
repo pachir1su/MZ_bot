@@ -22,7 +22,6 @@ class MZTranslator(app_commands.Translator):
         loc = context.location
         data = context.data
 
-        # 명령어 이름 한글화
         if loc is app_commands.TranslationContextLocation.command_name:
             if isinstance(data, app_commands.Command):
                 mapping = {
@@ -47,13 +46,12 @@ class MZTranslator(app_commands.Translator):
                 }
                 return mapping.get(data.name)
 
-        # 설명 한글화
         if loc is app_commands.TranslationContextLocation.command_description:
             if isinstance(data, app_commands.Command):
                 desc_map = {
                     "mz_money":        "10분마다 1,000 코인 지급",
                     "mz_attend":       "자정(00:00 KST)마다 초기화되는 출석 보상",
-                    "mz_rank":         "서버 잔액 순위 TOP 10(닉네임만 표시)",
+                    "mz_rank":         "서버 순위(닉네임·강화 표시)",
                     "mz_bet":          "승률 30~60% 랜덤, 결과는 ±베팅액 (최소 1,000₩)",
                     "mz_balance_show": "현재 잔액 확인(대상 선택 가능)",
                     "mz_transfer":     "서버 멤버에게 코인을 송금합니다",
@@ -67,19 +65,19 @@ class MZTranslator(app_commands.Translator):
                     "mz_enhance":      "무기 강화(+30). +10까지는 쉽게, 이후 난이도 상승",
                     "mz_duel":         "맞짱: 무기 등급+랜덤으로 승부, 동일 금액 베팅(0=전액)",
                     "mz_help":         "면진이 명령어 도움말",
-                    "mz_ping":         "봇의 핑 확인",
-                    "mz_profile":      "보유 금액, 서버 등수, 무기, 맞짱 전적 등 프로필",
+                    "mz_ping":         "봇의 핑(ms) 확인",
+                    "mz_profile":      "보유 금액, 등수, 무기, 맞짱 전적 등 프로필",
                 }
                 return desc_map.get(data.name)
 
         if loc is app_commands.TranslationContextLocation.parameter_description:
             if isinstance(data, app_commands.Parameter):
-                if data.name == "amount":    return "정수 금액(0=전액 / 최소 베팅 정책 준수)"
-                if data.name == "symbol":    return "종목(주식)/코인(가상 자산)"
-                if data.name == "question":  return "질문 내용"
-                if data.name == "member":    return "받는 사람 선택"
-                if data.name == "opponent":  return "상대 멤버"
-                if data.name == "user":      return "대상 사용자"
+                if data.name == "amount":   return "정수 금액(0=전액 / 최소 베팅 정책 준수)"
+                if data.name == "symbol":   return "종목(주식)/코인(가상 자산)"
+                if data.name == "question": return "질문 내용"
+                if data.name == "member":   return "받는 사람 선택"
+                if data.name == "opponent": return "상대 멤버"
+                if data.name == "user":     return "대상 사용자"
         return None
 
 # ───────── 기본 설정/봇 생성 ─────────
@@ -91,7 +89,7 @@ INTENTS = discord.Intents.default()
 INTENTS.message_content = False
 bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
-# ───────── DB 초기화/마이그 ─────────
+# ───────── DB 초기화 ─────────
 async def init_db():
     if not os.path.exists("models.sql"):
         return
@@ -100,33 +98,12 @@ async def init_db():
             await db.executescript(f.read())
         await db.commit()
 
-async def migrate_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys=ON;")
-        # guild_settings 확장 컬럼
-        cur = await db.execute("PRAGMA table_info(guild_settings)")
-        cols = {r[1] for r in await cur.fetchall()}
-        alters = []
-        if "enh_cost_mult" not in cols:
-            alters.append("ALTER TABLE guild_settings ADD COLUMN enh_cost_mult REAL NOT NULL DEFAULT 1.0;")
-        if "force_mode" not in cols:
-            alters.append("ALTER TABLE guild_settings ADD COLUMN force_mode TEXT NOT NULL DEFAULT 'off';")
-        if "force_target_user_id" not in cols:
-            alters.append("ALTER TABLE guild_settings ADD COLUMN force_target_user_id INTEGER NOT NULL DEFAULT 0;")
-        for sql in alters:
-            await db.execute(sql)
-        # ledger 인덱스(있으면 건너뜀)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger(guild_id, user_id, kind, ts);")
-        await db.commit()
-
-# ───────── 이벤트/셋업 ─────────
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} 로그인")
 
 async def setup_hook():
     await init_db()
-    await migrate_db()
 
     # 코그 로드
     await bot.load_extension("cogs.economy")
@@ -142,11 +119,11 @@ async def setup_hook():
     else:
         print("[load] cogs.genie not found — skipping")
     await bot.load_extension("cogs.markets")
-    await bot.load_extension("cogs.enhance")   # 강화
-    await bot.load_extension("cogs.duel")      # 맞짱(PvP)
-    await bot.load_extension("cogs.help")      # 도움말
-    await bot.load_extension("cogs.ping")      # 핑
-    await bot.load_extension("cogs.profile")   # 프로필
+    await bot.load_extension("cogs.enhance")
+    await bot.load_extension("cogs.duel")
+    await bot.load_extension("cogs.help")
+    await bot.load_extension("cogs.ping")      # ← 신규
+    await bot.load_extension("cogs.profile")   # ← 신규
 
     # 번역기 등록
     await bot.tree.set_translator(MZTranslator())
@@ -159,6 +136,7 @@ async def setup_hook():
             bot.tree.copy_global_to(guild=gobj)
             synced = await bot.tree.sync(guild=gobj)
             print(f"[sync] guild {gid} -> {len(synced)} cmds (copied global)")
+
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
         print("[sync] cleared global commands")
@@ -168,5 +146,4 @@ async def setup_hook():
 
 bot.setup_hook = setup_hook
 
-# ───────── 실행 ─────────
 bot.run(TOKEN)
